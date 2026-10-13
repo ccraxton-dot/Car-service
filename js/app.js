@@ -116,6 +116,24 @@ function whenText(d, overdue) {
   return `around ${d.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}`;
 }
 
+// Notes and recommendations from recent receipts (e.g. "housing cap damaged").
+function shopNotes(vid) {
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - 12);
+  return vehicleRecords(state.records, vid)
+    .filter((r) => r.notes && new Date(r.date + 'T12:00:00') >= cutoff)
+    .slice(0, 2);
+}
+
+function notesCard(vid) {
+  const recs = shopNotes(vid);
+  if (!recs.length) return '';
+  return `<div class="card shop-notes">
+    <h3>⚠︎ Notes from the shop</h3>
+    ${recs.map((r) => `<a href="#/r/${r.id}" class="shop-note"><span class="muted small">${fmtDate(r.date)}${r.shop ? ' · ' + esc(r.shop) : ''}</span><span class="pre">${esc(r.notes)}</span></a>`).join('')}
+  </div>`;
+}
+
 function planCard(items) {
   const { visit, diy } = planVisits(items, mode());
   if (!visit && !diy.length) return '';
@@ -181,6 +199,7 @@ function viewHome() {
         ${!overdue && !soon && recs.length ? '<span class="pill ok">All caught up</span>' : ''}
         ${norec ? `<span class="pill norecord">${norec} without records</span>` : ''}
       </div>
+      ${shopNotes(v.id).length ? `<div class="next warn">⚠︎ Shop note: ${esc(shopNotes(v.id)[0].notes.split('\n').pop())}</div>` : ''}
       ${next ? `<div class="next">Next: <b>${esc(next.name)}</b> · ${esc(leftText(next) || dueText(next))}</div>` : ''}
       <div class="muted small">${recs.length} service record${recs.length === 1 ? '' : 's'}${recs[0] ? ` · last ${fmtDate(recs[0].date)}` : ''}</div>
     </a>`;
@@ -222,7 +241,7 @@ function viewVehicle(vid, tab = 'due') {
   if (tab === 'due') {
     const tracked = items.filter((i) => i.status !== 'wait');
     const waiting = items.filter((i) => i.status === 'wait');
-    body = modeToggle() + planCard(items) + tracked.map(itemCard).join('')
+    body = modeToggle() + notesCard(vid) + planCard(items) + tracked.map(itemCard).join('')
       + (waiting.length ? `<h2>Can wait: go when you notice these signs</h2>${waiting.map(itemCard).join('')}` : '');
   } else if (tab === 'history') {
     body = `<div class="stats">
@@ -518,6 +537,7 @@ function applyReceiptText(manual, replace) {
   if (p.mileage && (replace || !d.mileage)) { d.mileage = p.mileage; filled.push('mileage'); }
   if (p.total) { d.total = p.total; filled.push('total'); }
   if (p.shop && (replace || !d.shop)) { d.shop = p.shop; filled.push('shop'); }
+  if (p.notes && (replace || !d.notes)) { d.notes = p.notes; filled.push('shop notes'); }
   if (p.services.length) {
     d.services = replace ? p.services : [...new Set([...d.services, ...p.services])];
     filled.push(`${p.services.length} service${p.services.length > 1 ? 's' : ''}`);

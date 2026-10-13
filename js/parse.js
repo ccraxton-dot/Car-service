@@ -102,34 +102,61 @@ export function toISODate(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+// Receipts scanned or copied from a photo often come out one cell per line,
+// so labels and values end up far apart. These helpers work line by line.
+const splitLines = (text) => text.split('\n').map((l) => l.trim()).filter(Boolean);
+const VIN = /\b[A-HJ-NPR-Z0-9]{17}\b/;
+
+function mileageValue(str) {
+  const nums = str.match(/\b\d{1,3}(?:,\d{3})+\b|\b\d{3,6}\b/g) || [];
+  for (const n of nums) {
+    const val = +n.replace(/,/g, '');
+    if (val >= 100 && val < 400000 && !(val >= 1990 && val <= 2035 && !n.includes(','))) return val;
+  }
+  return null;
+}
+
 export function detectMileage(text) {
-  const lines = text.split('\n');
-  const labelled = /(mileage|odometer|odo\b|miles\s*in|mi\s*in|in\s*miles|km\s*in|mileage\s*in|current\s*miles)/i;
+  const lines = splitLines(text);
+  const labelled = /(mileage|odometer|odo\b|miles\s*in|mi\s*in|in\s*miles|km\s*in|current\s*miles)/i;
   const skip = /(next|due|recommend|return|out\b)/i;
+  // 1. "Mileage In: 41,236" on one line, or the number on the next line.
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!labelled.test(line) || skip.test(line)) continue;
-    const nums = (line + ' ' + (lines[i + 1] || '')).match(/\b\d{1,3}(?:,\d{3})+\b|\b\d{3,6}\b/g);
-    if (nums) {
-      for (const n of nums) {
-        const val = +n.replace(/,/g, '');
-        if (val >= 100 && val < 400000 && !(val >= 1990 && val <= 2035 && !n.includes(','))) return val;
+    if (!labelled.test(lines[i]) || skip.test(lines[i])) continue;
+    const val = mileageValue(lines[i]) ?? (/^[\d,]+$/.test(lines[i + 1] || '') ? mileageValue(lines[i + 1]) : null);
+    if (val) return val;
+  }
+  // 2. A bare number just after the license plate or VIN (vehicle info block).
+  const plates = VEHICLES.map((v) => fuzzy(v.plate));
+  for (let i = 0; i < lines.length; i++) {
+    const isPlate = plates.some((p) => fuzzy(lines[i]) === p || fuzzy(lines[i]).endsWith(p));
+    if (!isPlate && !VIN.test(lines[i])) continue;
+    for (const next of lines.slice(i + 1, i + 4)) {
+      if (/^\d{1,3}(,\d{3})+$|^\d{3,6}$/.test(next)) {
+        const val = mileageValue(next);
+        if (val) return val;
       }
     }
   }
   return null;
 }
 
+const MONEY = /\(?\$?\s?(\d{1,5}(?:,\d{3})*\.\d{2})\)?/g;
+
 export function detectTotal(text) {
-  const lines = text.split('\n');
+  const lines = splitLines(text);
+  const label = /(\btotal\b|amount due|balance due|grand|amount paid|pay this|total due)/i;
+  const notTotal = /sub\s*-?total|\btax\b|labor\s*total|parts\s*total|savings|discount/i;
   let best = null;
-  for (const line of lines) {
-    if (!/(total|amount due|balance due|grand|amount paid|pay this)/i.test(line)) continue;
-    if (/sub\s*-?total|tax|labor\s*total|parts\s*total/i.test(line)) continue;
-    const amts = line.match(/\$?\s?(\d{1,5}(?:,\d{3})*\.\d{2})/g);
+  for (let i = 0; i < lines.length; i++) {
+    if (!label.test(lines[i]) || notTotal.test(lines[i])) continue;
+    // Amount on the same line, or on the next line when it's in its own cell.
+    let amts = lines[i].match(MONEY);
+    if (!amts && /^\(?\$?\s?[\d,]+\.\d{2}\)?$/.test(lines[i + 1] || '')) amts = lines[i + 1].match(MONEY);
     if (!amts) continue;
-    const v = +amts[amts.length - 1].replace(/[$,\s]/g, '');
-    if (best === null || v > best) best = v;
+    const v = +amts[amts.length - 1].replace(/[$,()\s]/g, '');
+    // "Amount Due Today" / "Total" usually agree; the last labelled amount wins.
+    best = v;
   }
   if (best !== null) return best;
   // Fall back to the largest dollar amount on the receipt.
@@ -138,9 +165,23 @@ export function detectTotal(text) {
   return Math.max(...all.map((a) => +a.replace(/[$,\s]/g, '')));
 }
 
+const SHOP_WORDS = /\b(oil|lube|auto|automotive|tire|tires|motors?|kia|nissan|garage|repair|car care|service center|valvoline|jiffy|firestone|pep boys|midas|meineke|goodyear|costco|walmart|discount tire|les schwab|mavis|monro|take 5|grease monkey|express)\b/i;
+const NOT_SHOP = /(technician|customer|checklist|invoice|receipt|repair order|surcharge|\bfilter\b|\bchange\b|cleaner|\bsystem\b|\bfluid\b|\bpoints\b|www\.|http|@)/i;
+
 export function detectShop(text) {
-  // First non-trivial line is usually the business name.
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const lines = splitLines(text).slice(0, 30);
+  // A short name-like line in capitals that sounds like a shop ("OIL CHANGERS").
+  for (const l of lines) {
+    const words = l.split(/\s+/);
+    if (words.length > 5 || /\d/.test(l) || NOT_SHOP.test(l)) continue;
+    if (SHOP_WORDS.test(l) && l === l.toUpperCase()) return titleCase(l);
+  }
+  for (const l of lines) {
+    if (l.split(/\s+/).length <= 5 && !/\d/.test(l) && !NOT_SHOP.test(l) && SHOP_WORDS.test(l)) return titleCase(l);
+  }
+  // The shop's website name (www.oilchangers.com).
+  const site = text.match(/www\.([a-z0-9-]+)\.(com|net|biz|us)/i);
+  if (site) return titleCase(site[1].replace(/-/g, ' '));
   for (const l of lines.slice(0, 5)) {
     const letters = l.replace(/[^A-Za-z]/g, '');
     if (letters.length >= 4 && !/invoice|receipt|repair order|date|phone|www\.|http/i.test(l)) {
@@ -150,21 +191,52 @@ export function detectShop(text) {
   return '';
 }
 
+function titleCase(s) {
+  return s.toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase()).trim().slice(0, 60);
+}
+
+// Inspection checklists list items with a status ("Brake Fluid · Checked",
+// "Wiper Blades · OK"). Those were looked at, not replaced.
+const STATUS_ONLY = /^(ok|okay|good|fine|full|filled|checked|inspected|completed?|done|n\/?a|maintenance free|low|topped off|top off|pass(ed)?|fail(ed)?|yes|no|green|yellow|red|clean|dirty|serviceable|needs attention|level)\.?$/i;
+const STATUS_WORD = /\b(ok|checked|inspected|filled|topped|top off|level|good|maintenance free)\b/i;
+const DID_WORK = /(chang|replac|flush|exchang|install|rotat|\bnew\b|r&r|drain|refill|recharge|mount|balanc|align|\$|\d+\.\d{2})/i;
+
 export function detectServices(text) {
   const found = new Set();
-  const lines = text.toLowerCase().split('\n');
-  for (const line of lines) {
+  const lines = splitLines(text);
+  lines.forEach((raw, i) => {
+    const line = raw.toLowerCase();
+    const next = lines[i + 1] || '';
+    const checklistItem = STATUS_ONLY.test(next) || (STATUS_WORD.test(line) && !DID_WORK.test(line));
     for (const [id, svc] of Object.entries(SERVICES)) {
       if (!svc.keywords.length) continue;
       if (svc.exclude && svc.exclude.some((x) => line.includes(x))) continue;
-      if (svc.keywords.some((k) => line.includes(k))) found.add(id);
+      if (!svc.keywords.some((k) => line.includes(k))) continue;
+      if (checklistItem) continue;
+      found.add(id);
     }
-  }
+  });
   // "spark plug" would also match "plugs" in tire-plug repairs; keep it only if explicit.
   if (found.has('spark_plugs') && !/spark/i.test(text)) found.delete('spark_plugs');
   // "blade" alone is weak; require "wiper".
   if (found.has('wipers') && !/wiper/i.test(text)) found.delete('wipers');
   return [...found];
+}
+
+// Technician comments and recommendations ("oil filter housing cap damaged").
+const CONCERN = /(damag|leak|seep|worn|wear\b|crack|torn|broken|cracked|recommend|advis|suggest|needs?\b|replace soon|soon\b|low\b|failing|weak|noise|vibrat|corro|rust|loose|missing|bad\b|check\b.*\b(cap|leak|noise|light))/i;
+const BOILERPLATE = /(guarantee|privacy|policy|claim|signature|waive|reimburse|approve|warranty|thank|visit|scan|qr code|www\.|http|procedure|terms|disclaimer)/i;
+const CHECKLIST_LABEL = /^(battery|lights|belts|hoses|wipers?|wiper blades|tires?|tire pressures?|brake fluid|washer fluid|coolant reservoir|air filter)$/i;
+
+export function detectNotes(text) {
+  const lines = splitLines(text);
+  const notes = [];
+  for (const l of lines) {
+    if (l.length < 8 || l.length > 140 || BOILERPLATE.test(l) || CHECKLIST_LABEL.test(l)) continue;
+    if (STATUS_ONLY.test(l)) continue;
+    if (CONCERN.test(l) && !notes.includes(l)) notes.push(l);
+  }
+  return notes.join('\n');
 }
 
 export function parseReceipt(text) {
@@ -175,5 +247,6 @@ export function parseReceipt(text) {
     total: detectTotal(text),
     shop: detectShop(text),
     services: detectServices(text),
+    notes: detectNotes(text),
   };
 }
