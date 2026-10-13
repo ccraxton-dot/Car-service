@@ -173,7 +173,7 @@ const SHOP_WORDS = /\b(oil|lube|auto|automotive|tire|tires|motors?|kia|nissan|ga
 const NOT_SHOP = /(technician|customer|checklist|invoice|receipt|repair order|surcharge|\bfilter\b|\bchange\b|cleaner|\bsystem\b|\bfluid\b|\bpoints\b|www\.|http|@)/i;
 
 export function detectShop(text) {
-  const lines = splitLines(text).slice(0, 30);
+  const lines = splitLines(text).slice(0, 60).map((l) => l.replace(/\s*#\s*\d+$/, ''));
   // A short name-like line in capitals that sounds like a shop ("OIL CHANGERS").
   for (const l of lines) {
     const words = l.split(/\s+/);
@@ -184,7 +184,7 @@ export function detectShop(text) {
     if (l.split(/\s+/).length <= 5 && !/\d/.test(l) && !NOT_SHOP.test(l) && SHOP_WORDS.test(l)) return titleCase(l);
   }
   // The shop's website name (www.oilchangers.com).
-  const site = text.match(/www\.([a-z0-9-]+)\.(com|net|biz|us)/i);
+  const site = [...text.matchAll(/www\.([a-z0-9-]+)\.(com|net|biz|us)\b/gi)].find((m) => !/twostepsonesticker|txdmv|dps|texas|mykaarma/i.test(m[1]));
   if (site) return titleCase(site[1].replace(/-/g, ' '));
   for (const l of lines.slice(0, 5)) {
     const letters = l.replace(/[^A-Za-z]/g, '');
@@ -363,6 +363,17 @@ export function parseReceipt(text) {
   return parseReceiptBody(text);
 }
 
+// State inspection result ("Overall Result: PASS", "Fault Codes: No Codes Present").
+function stateInspectionNotes(text) {
+  if (!/vehicle inspection report|emissions test|overall result/i.test(text)) return '';
+  const result = text.match(/overall result:?\s*(pass|fail)/i);
+  const codes = text.match(/fault codes:?\s*([^\n]+)/i);
+  const parts = [];
+  if (result) parts.push(`State inspection: ${result[1].toUpperCase()}`);
+  if (codes) parts.push(/no codes/i.test(codes[1]) ? 'no fault codes' : `fault codes: ${codes[1].trim()}`);
+  return parts.length ? parts.join(', ') + '.' : '';
+}
+
 function parseReceiptBody(text) {
   return {
     vehicleId: detectVehicle(text),
@@ -371,6 +382,6 @@ function parseReceiptBody(text) {
     total: detectTotal(text),
     shop: detectShop(text),
     services: detectServices(text),
-    notes: detectNotes(text),
+    notes: [stateInspectionNotes(text), detectNotes(text)].filter(Boolean).join('\n'),
   };
 }

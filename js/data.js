@@ -112,8 +112,12 @@ export const SERVICES = {
     keywords: ['refrigerant', 'a/c recharge', 'ac recharge', 'a/c service', 'freon', 'r-1234yf', 'r1234yf'],
   },
   inspection: {
-    name: 'Multi-point / state inspection',
-    keywords: ['multi-point', 'multipoint', 'multi point', 'state inspection', 'safety inspection', 'emissions'],
+    name: 'Multi-point inspection',
+    keywords: ['multi-point', 'multipoint', 'multi point', 'vehicle health report'],
+  },
+  state_inspection: {
+    name: 'State inspection (emissions)',
+    keywords: ['vehicle inspection report', 'state inspection', 'emissions test', 'safety inspection', 'emissions only', 'emissions (i/m)', 'inspection decal'],
   },
   fuel_system: {
     name: 'Fuel system cleaning',
@@ -156,6 +160,8 @@ export const SCHEDULES = {
       note: 'Have it load-tested every year once it is 3+ years old.' },
     { service: 'wipers', miles: null, months: 12, action: 'replace',
       note: 'Replace when they streak or chatter, usually about once a year.' },
+    { service: 'state_inspection', miles: null, months: 12, action: 'inspect',
+      note: 'Travis County (Austin) requires a yearly emissions test to renew registration. Get it within 90 days before your registration expires, then renew online.' },
   ],
   kicks: [
     { service: 'oil', miles: 5000, months: 6, action: 'replace',
@@ -182,6 +188,8 @@ export const SCHEDULES = {
       note: 'Load-test it every year from year 3 on. Original batteries often fail around years 4–6.' },
     { service: 'wipers', miles: null, months: 12, action: 'replace',
       note: 'Replace when they streak.' },
+    { service: 'state_inspection', miles: null, months: 12, action: 'inspect',
+      note: 'Travis County (Austin) requires a yearly emissions test to renew registration. Get it within 90 days before your registration expires, then renew online.' },
   ],
   leaf: [
     { service: 'hv_battery', miles: null, months: 12, action: 'inspect',
@@ -228,6 +236,7 @@ export const TIPS = {
     { title: 'Annual battery report', body: 'Get the Li-ion battery check every year and keep the printout. It documents capacity, which matters for resale value and any capacity-warranty claims. The free LeafSpy app with a cheap OBD-II dongle shows state of health anytime.' },
     { title: '12V battery = most "dead car" problems', body: 'Low 12V voltage causes random warning lights and a car that won\'t power on. The 12V only charges while the car is on or charging. Replace it every 3–5 years.' },
     { title: 'Exercise the brakes', body: 'Regen does most of the braking, so the friction brakes can rust and seize. Brake firmly now and then (safely) to clean the rotors, and have the calipers lubricated each year.' },
+    { title: 'No state inspection needed', body: 'Electric cars are exempt from Texas emissions testing, and Texas ended safety inspections for passenger cars in 2025. Just renew the registration each year. It includes an extra yearly fee for EVs.' },
     { title: 'Tires & efficiency', body: 'Keep tires at the door-placard pressure. Under-inflation noticeably cuts range. When replacing tires, low-rolling-resistance tires keep range up.' },
   ],
 };

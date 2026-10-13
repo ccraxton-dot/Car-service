@@ -62,6 +62,10 @@ export const DIY = {
     level: 'easy', time: '2 min', part: '$20–30 Bluetooth OBD-II dongle + the LeafSpy app', shop: '$0–100 at the dealer',
     how: 'Plug the dongle into the port under the dash and open LeafSpy. It shows battery health (SOH), Hx and capacity anytime, so you don\'t need a dealer visit. Screenshot it once a year for your records.',
   },
+  state_inspection: {
+    level: 'shop', time: '15 min', part: '—', shop: '$7–25 (Travis County emissions test)',
+    how: 'Any certified inspection station will do it. Quick-lube shops are fastest. Do it within 90 days before the registration expires, then renew online at TxDMV.',
+  },
   reduction_gear: {
     level: 'shop', time: '—', part: '—', shop: '$80–150',
     how: 'Any independent shop can drain and refill it.',
@@ -82,6 +86,7 @@ export const ESSENTIALS = {
     drive_belt: { tier: 'wait', wait: 'Look at it when the hood is open. Replace it when it\'s cracked, frayed or squealing.' },
     battery_12v: { tier: 'wait', wait: 'Wait for the signs: slow cranking, dim lights at start-up, or the battery is 5+ years old. Then get a free test at a parts store.' },
     wipers: { tier: 'wait', wait: 'Replace when they streak or skip.' },
+    state_inspection: { tier: 'essential', wait: 'Required by law to renew registration, so it can\'t be skipped. It takes 15 minutes at most quick-lube shops. Combine it with an oil change.' },
   },
   kicks: {
     oil: { tier: 'essential', miles: 7500, months: 12, wait: 'Your 2020 Kicks is past its 5-year/60,000-mile powertrain warranty, so full-synthetic 0W-20 every 7,500 mi or 12 months is a reasonable stretch from Nissan\'s 5,000. Check the dipstick monthly, because small engines can burn a little oil.' },
@@ -96,6 +101,7 @@ export const ESSENTIALS = {
     drive_belt: { tier: 'wait', wait: 'Replace when it\'s cracked or squealing.' },
     battery_12v: { tier: 'wait', wait: 'Wait for slow cranking, then get a free test. At 6 years old, expect to replace it soon, so don\'t be surprised.' },
     wipers: { tier: 'wait', wait: 'Replace when they streak.' },
+    state_inspection: { tier: 'essential', wait: 'Required by law to renew registration. It takes 15 minutes at most quick-lube shops. Combine it with an oil change.' },
   },
   leaf: {
     coolant: { tier: 'essential', wait: 'The 2015 is past the 7-year first change. If it has never been done, do it once at an independent shop. It protects the inverter and charger, which are expensive parts.' },
@@ -105,7 +111,11 @@ export const ESSENTIALS = {
     cabin_filter: { tier: 'diy', months: 24, miles: 30000, wait: 'Fine to go 2 years unless the A/C smells.' },
     tire_rotation: { tier: 'wait', wait: 'EVs do wear tires faster. Get rotations free where you buy tires, and check tread with a penny.' },
     brakes: { tier: 'wait', wait: 'The pads barely wear, but calipers can stick from lack of use. Go if you hear grinding, smell burning after a drive, one wheel is much hotter or dirtier than the others, or the car pulls. To help prevent sticking, brake firmly now and then.' },
-    reduction_gear: { tier: 'wait', wait: 'Nissan lists it as inspect-only. Skip it unless it gets noisy (whine or clunk).' },
+    state_inspection: {
+    level: 'shop', time: '15 min', part: '—', shop: '$7–25 (Travis County emissions test)',
+    how: 'Any certified inspection station will do it. Quick-lube shops are fastest. Do it within 90 days before the registration expires, then renew online at TxDMV.',
+  },
+  reduction_gear: { tier: 'wait', wait: 'Nissan lists it as inspect-only. Skip it unless it gets noisy (whine or clunk).' },
     wipers: { tier: 'wait', wait: 'Replace when they streak.' },
   },
 };

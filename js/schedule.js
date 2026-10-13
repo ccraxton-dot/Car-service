@@ -99,7 +99,9 @@ export function dueItems(vehicleId, records, odo, overrides, inService, mode = '
 
     let status;
     const overdue = (milesLeft !== null && milesLeft <= 0) || (daysLeft !== null && daysLeft <= 0);
-    const soon = (milesLeft !== null && milesLeft <= SOON_MILES) || (daysLeft !== null && daysLeft <= SOON_DAYS);
+    // "Due soon" scales with the interval: 1,000 mi for an oil change, ~5,000 for spark plugs.
+    const soonMiles = Math.max(SOON_MILES, (miInt || 0) * 0.05);
+    const soon = (milesLeft !== null && milesLeft <= soonMiles) || (daysLeft !== null && daysLeft <= SOON_DAYS);
     const unknown = milesLeft === null && daysLeft === null;
     if ((!last && overdue) || (!last && unknown)) status = 'norecord';
     else if (overdue) status = 'overdue';
