@@ -552,18 +552,26 @@ function applyReceiptText(manual, replace) {
 }
 
 function pasteText(manual) {
+  const hasText = !!draft.ocrText;
   sheet(`<h3>Paste receipt text</h3>
     <p class="muted small">On iPhone: open the receipt photo, press and hold on the text, then tap Select All → Copy. Android: open the photo in Google Photos or Lens, then tap Text → Copy.</p>
+    ${hasText ? '<p class="small"><b>Multi-page receipt?</b> Paste the next page and tap <b>Add as next page</b>. The pages are read together.</p>' : ''}
     <label>Receipt text<textarea id="pasted" rows="10" placeholder="Paste the receipt text here"></textarea></label>
-    <div class="row"><button class="btn ghost" data-close>Cancel</button><button class="btn" id="readText">Read text</button></div>`,
+    <div class="row">
+      ${hasText ? '<button class="btn ghost" id="replaceText">Replace text</button><button class="btn" id="appendText">Add as next page</button>'
+        : '<button class="btn ghost" data-close>Cancel</button><button class="btn" id="replaceText">Read text</button>'}
+    </div>`,
   (el, close) => {
-    el.querySelector('#readText').onclick = () => {
+    const read = (append) => {
       const text = el.querySelector('#pasted').value.trim();
       if (!text) return toast('Paste some text first');
-      draft.ocrText = text;
+      draft.ocrText = append ? `${draft.ocrText}\n${text}` : text;
       close();
       applyReceiptText(manual, true);
     };
+    el.querySelector('#replaceText').onclick = () => read(false);
+    const appendBtn = el.querySelector('#appendText');
+    if (appendBtn) appendBtn.onclick = () => read(true);
   });
 }
 
