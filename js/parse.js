@@ -243,7 +243,127 @@ export function detectNotes(text) {
   return notes.join('\n');
 }
 
+// ---------- Multi-point inspection reports ----------
+// Dealer inspections list *recommended* work with estimates. None of it was
+// done, so it must never be recorded as a service. Instead we pull out the
+// recommendations (with severity), tire tread and brake pad measurements,
+// and any recalls/campaigns performed.
+
+const INSPECTION = /(multi[\s-]?point|inspection results|vehicle health|needs immediate attention|needs attention soon|passed inspection)/i;
+
+const NOISE_LINE = /^(print|a|atte|notes?|-notes|https?:\/\/\S+|\d+\/\d+|repair estimate:?|\$[\d,.]+)$/i;
+
+function serviceFor(line) {
+  const l = line.toLowerCase();
+  for (const [id, svc] of Object.entries(SERVICES)) {
+    if (!svc.keywords.length || id === 'inspection') continue;
+    if (svc.exclude && svc.exclude.some((x) => l.includes(x))) continue;
+    if (svc.keywords.some((k) => l.includes(k))) return id;
+  }
+  if (/\bcoolant|antifreeze/.test(l)) return 'coolant';
+  if (/engine oil/.test(l)) return 'oil';
+  if (/transmission|\batf\b|cvt/.test(l)) return 'transmission_fluid';
+  if (/\bbrake/.test(l)) return 'brakes';
+  return null;
+}
+
+export function detectInspection(text) {
+  if (!INSPECTION.test(text)) return null;
+  const lines = splitLines(text);
+  const recommendations = [];
+  let severity = null;
+  let lastEstimateIdx = -1;
+
+  lines.forEach((line, i) => {
+    if (/needs immediate attention|immediate attention|\bred\b.*items?/i.test(line)) severity = 'urgent';
+    else if (/needs attention soon|attention soon|future attention|\byellow\b.*items?/i.test(line)) severity = 'soon';
+    else if (/passed inspection|checked and ok|\bgreen\b.*items?/i.test(line)) severity = null;
+    if (!/repair estimate|estimate:/i.test(line) || !severity) return;
+    const amountLine = /\$[\d,]+\.\d{2}/.test(line) ? line : lines[i + 1] || '';
+    const m = amountLine.match(/\$([\d,]+\.\d{2})/);
+    const estimate = m ? +m[1].replace(/,/g, '') : null;
+    // Look back for the item's title (skipping noise), then forward through
+    // its description, until we hit the previous/next estimate.
+    let service = null;
+    let label = '';
+    const isTitle = (l) => !NOISE_LINE.test(l) && l.split(/\s+/).length <= 8
+      && !/needs (immediate )?attention|condition and interval|interior|exterior|under hood|under vehicle/i.test(l);
+    const back = [];
+    for (let j = i - 1; j > lastEstimateIdx && j >= i - 6; j--) if (isTitle(lines[j])) back.push(lines[j]);
+    // 1. The nearest title-like line above the estimate.
+    if (back.length) { label = back[0]; service = serviceFor(back[0]); }
+    // 2. Other short lines above it ("CUSTOMER REQUESTS ENGINE AIR FILTER").
+    for (const l of back.slice(1)) { if (service) break; const svc = serviceFor(l); if (svc) { service = svc; label = l; } }
+    // 3. The description after the estimate ("THE FUEL SYSTEM IS…").
+    for (let j = i + 2; !service && j < Math.min(lines.length, i + 6); j++) {
+      if (/repair estimate/i.test(lines[j])) break;
+      service = serviceFor(lines[j]);
+    }
+    lastEstimateIdx = i + 1;
+    if (!service && !label) return;
+    if (service && recommendations.some((r) => r.service === service)) return;
+    recommendations.push({
+      service: service || 'other',
+      label: label.replace(/^[!\d\s]+/, '').trim(),
+      estimate,
+      severity,
+    });
+  });
+
+  // Tire tread: "Left Front Tire - 5/32"", "LF 5/32"
+  const tread = {};
+  const treadRe = /\b(left|right|l|r)\s*(front|rear|f|r)\b[^\n\d]{0,12}?(\d{1,2})\s*\/\s*32/gi;
+  let m;
+  while ((m = treadRe.exec(text))) {
+    const key = (m[1][0] + m[2][0]).toUpperCase();
+    tread[key] = +m[3];
+  }
+  // Brake pads: "Left Front Brake - 7mm or Greater"
+  const pads = {};
+  const padRe = /\b(left|right)\s*(front|rear)\s*(brake|pad)[^\n\d]{0,10}?(\d{1,2}(?:\.\d)?)\s*mm(\s*or\s*greater|\+)?/gi;
+  while ((m = padRe.exec(text))) {
+    const key = (m[1][0] + m[2][0]).toUpperCase();
+    pads[key] = { mm: +m[4], orMore: !!m[5] };
+  }
+  // Recalls and campaigns (free warranty work done on the visit).
+  const recalls = [];
+  for (const l of lines) {
+    const code = l.match(/\b(SC\d{3}|P\d{5}|\d{2}V\d{3}|R\d{4}|[A-Z]{2}\d{3})\b/);
+    if (code && /recall|campaign|imprvmt|improvement|install/i.test(l) && !recalls.some((r) => r.startsWith(code[1]))) {
+      recalls.push(l.replace(/\s+/g, ' ').slice(0, 90));
+    }
+  }
+
+  return { recommendations, tread, pads, recalls };
+}
+
 export function parseReceipt(text) {
+  const inspection = detectInspection(text);
+  if (inspection) {
+    let shop = detectShop(text);
+    if (/^(kia|nissan)$/i.test(shop)) shop = `${titleCase(shop)} dealer`;
+    const urgent = inspection.recommendations.filter((r) => r.severity === 'urgent').length;
+    const soon = inspection.recommendations.length - urgent;
+    const quoted = inspection.recommendations.reduce((s, r) => s + (r.estimate || 0), 0);
+    const notes = [
+      `Inspection: ${urgent} marked urgent, ${soon} marked soon${quoted ? `, $${quoted.toFixed(2)} quoted (not done)` : ''}.`,
+      ...inspection.recalls.map((r) => `Recall/campaign: ${r}`),
+    ].join('\n');
+    return {
+      vehicleId: detectVehicle(text),
+      date: detectDate(text),
+      mileage: detectMileage(text),
+      total: null, // an estimate, not money spent
+      shop,
+      services: ['inspection'],
+      notes,
+      inspection,
+    };
+  }
+  return parseReceiptBody(text);
+}
+
+function parseReceiptBody(text) {
   return {
     vehicleId: detectVehicle(text),
     date: detectDate(text),

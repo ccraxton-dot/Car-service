@@ -121,7 +121,7 @@ function shopNotes(vid) {
   const cutoff = new Date();
   cutoff.setMonth(cutoff.getMonth() - 12);
   return vehicleRecords(state.records, vid)
-    .filter((r) => r.notes && new Date(r.date + 'T12:00:00') >= cutoff)
+    .filter((r) => r.notes && !r.inspection && new Date(r.date + 'T12:00:00') >= cutoff)
     .slice(0, 2);
 }
 
@@ -132,6 +132,118 @@ function notesCard(vid) {
     <h3>⚠︎ Notes from the shop</h3>
     ${recs.map((r) => `<a href="#/r/${r.id}" class="shop-note"><span class="muted small">${fmtDate(r.date)}${r.shop ? ' · ' + esc(r.shop) : ''}</span><span class="pre">${esc(r.notes)}</span></a>`).join('')}
   </div>`;
+}
+
+// ---------- dealer inspections ----------
+const SEV_LABEL = { urgent: 'Dealer: urgent', soon: 'Dealer: soon' };
+const POS = { LF: 'Left front', RF: 'Right front', LR: 'Left rear', RR: 'Right rear' };
+
+function inspectionSummary(insp) {
+  const recs = insp.recommendations || [];
+  const t = insp.tread || {};
+  const pd = insp.pads || {};
+  return `<div class="card insp-summary">
+    <h3>Inspection findings</h3>
+    ${recs.length ? `<p class="small muted">Recommended, not done:</p><ul class="plan-list">${recs.map((r) => `<li><span class="sev ${r.severity}"></span>${esc(SERVICES[r.service]?.name || r.label)}${r.estimate ? ` <span class="muted small">· ${fmtMoney(r.estimate)}</span>` : ''}</li>`).join('')}</ul>` : ''}
+    ${Object.keys(t).length ? `<p class="small"><b>Tire tread:</b> ${Object.entries(t).map(([k, v]) => `${k} ${v}/32″`).join(' · ')}</p>` : ''}
+    ${Object.keys(pd).length ? `<p class="small"><b>Brake pads:</b> ${Object.entries(pd).map(([k, v]) => `${k} ${v.mm}${v.orMore ? '+' : ''} mm`).join(' · ')}</p>` : ''}
+  </div>`;
+}
+
+function latestInspection(vid) {
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - 12);
+  return vehicleRecords(state.records, vid).find((r) => r.inspection && new Date(r.date + 'T12:00:00') >= cutoff) || null;
+}
+
+// My take on one dealer recommendation, using this car's own records and schedule.
+function verdict(vid, insp, rec, items) {
+  const est = rec.estimate ? fmtMoney(rec.estimate) : 'the quote';
+  const later = vehicleRecords(state.records, vid)
+    .filter((r) => r.id !== insp.id && r.date >= insp.date && (r.services || []).includes(rec.service))
+    .pop();
+  if (later) {
+    const price = later.total && later.services.length === 1 ? ` for ${fmtMoney(later.total)}` : '';
+    const saved = later.total && later.services.length === 1 && rec.estimate > later.total ? ` (saved ${fmtMoney(rec.estimate - later.total)})` : '';
+    return { kind: 'done', text: `Done ${fmtDate(later.date)}${later.shop ? ' at ' + esc(later.shop) : ''}${price}${saved}.` };
+  }
+  if (rec.service === 'fuel_system') return { kind: 'skip', text: `Usually an upsell. It isn't in the manufacturer's schedule. Decline it, and use Top Tier gas instead.` };
+  if (rec.service === 'alignment') return { kind: 'maybe', text: `Only needed if the car pulls, the steering wheel sits off-center, or a tire wears on one edge. Ask them to show you the uneven wear. Otherwise skip it.` };
+  if (rec.service === 'tire_rotation') return { kind: 'diy', text: `Worth doing, but it's free for life where you buy tires (Discount Tire, Costco), or $25 with an oil change. No need to pay ${est}.` };
+  const it = items.find((i) => i.service === rec.service);
+  if (!it) return { kind: 'maybe', text: 'Ask what happens if you wait. If the answer isn\'t about safety or damage, it can wait.' };
+  // Was it actually due at the time of the inspection?
+  const notDue = it.status === 'ok' || (it.status === 'wait' && it.tier === 'wait');
+  if (it.tier === 'diy' && it.diy) return { kind: 'diy', text: `Do it yourself: ${esc(it.diy.time)}, parts ${esc(it.diy.part)} instead of ${est}.` };
+  if (it.status === 'wait') return { kind: 'skip', text: `Can wait. ${esc(it.wait || '')}` };
+  if (notDue) return { kind: 'skip', text: `Not due by your schedule. ${esc(dueText(it))}.` };
+  const cheaper = it.diy && it.diy.shop ? ` An independent shop usually charges ${esc(it.diy.shop)}.` : '';
+  return { kind: 'due', text: `Reasonable: it's due by your schedule.${cheaper}` };
+}
+
+const VERDICT_LABEL = { done: 'Done', skip: 'Skip / wait', diy: 'DIY / cheaper', maybe: 'Only if…', due: 'Do it' };
+
+function inspectionCard(vid, items) {
+  const insp = latestInspection(vid);
+  if (!insp || !insp.inspection.recommendations.length) return '';
+  const recs = insp.inspection.recommendations;
+  const quoted = recs.reduce((s, r) => s + (r.estimate || 0), 0);
+  const rows = recs.map((r) => ({ r, v: verdict(vid, insp, r, items) }));
+  const needed = rows.filter((x) => x.v.kind === 'due').reduce((s, x) => s + (x.r.estimate || 0), 0);
+  return `<div class="card insp">
+    <h3>🔍 Dealer inspection, ${fmtDate(insp.date)}</h3>
+    <p class="small muted">They recommended ${recs.length} items (${fmtMoney(quoted)}). Here's what actually matters, based on your records and the ${mode() === 'essential' ? 'Essentials' : 'full'} schedule${needed ? `. Worth doing now: about ${fmtMoney(needed)}` : ''}.</p>
+    ${rows.map(({ r, v }) => `<div class="insp-row">
+      <div class="insp-head"><span><span class="sev ${r.severity}" title="${SEV_LABEL[r.severity]}"></span><b>${esc(SERVICES[r.service]?.name || r.label)}</b>${r.estimate ? ` <span class="muted small">· quoted ${fmtMoney(r.estimate)}</span>` : ''}</span><span class="verdict ${v.kind}">${VERDICT_LABEL[v.kind]}</span></div>
+      <div class="small">${v.text}</div>
+    </div>`).join('')}
+    <a class="link small" href="#/r/${insp.id}">View full inspection</a>
+  </div>`;
+}
+
+// Tire tread and brake pad measurements from the latest inspection.
+const TREAD_REPLACE = 4; // 32nds — recommended for wet grip (2/32 is the legal minimum)
+const MILES_PER_32ND = 5000; // rough rule of thumb when we only have one measurement
+
+function wearCard(vid, odo) {
+  const recs = vehicleRecords(state.records, vid).filter((r) => r.inspection && (Object.keys(r.inspection.tread || {}).length || Object.keys(r.inspection.pads || {}).length));
+  if (!recs.length) return '';
+  const latest = recs[0];
+  const t = latest.inspection.tread || {};
+  const pd = latest.inspection.pads || {};
+  let tireText = '';
+  if (Object.keys(t).length) {
+    const min = Math.min(...Object.values(t));
+    const max = Math.max(...Object.values(t));
+    // Wear rate: from two inspections if we have them, else a rule of thumb.
+    const prev = recs.slice(1).find((r) => Object.keys(r.inspection.tread || {}).length && r.mileage);
+    let perMile = 1 / MILES_PER_32ND;
+    let rough = true;
+    if (prev && latest.mileage > prev.mileage) {
+      const prevMin = Math.min(...Object.values(prev.inspection.tread));
+      if (prevMin > min) { perMile = (prevMin - min) / (latest.mileage - prev.mileage); rough = false; }
+    }
+    const milesSince = odo.miles && latest.mileage ? Math.max(0, odo.miles - latest.mileage) : 0;
+    const nowMin = min - milesSince * perMile;
+    const milesLeft = Math.max(0, (nowMin - TREAD_REPLACE) / perMile);
+    const monthsLeft = odo.perYear ? Math.round((milesLeft / odo.perYear) * 12) : null;
+    const state = nowMin <= 3 ? 'urgent' : nowMin <= 5 ? 'soon' : 'ok';
+    tireText = `<div class="wear-row"><span class="sev ${state === 'ok' ? 'good' : state}"></span><div>
+      <b>Tires:</b> ${Object.entries(t).map(([k, v]) => `${k} ${v}/32″`).join(' · ')} <span class="muted small">(${fmtDate(latest.date)})</span><br>
+      <span class="small">${milesLeft <= 0 ? 'Plan new tires now. Below 4/32″, wet-road grip drops a lot.' : `Plan new tires in roughly <b>${monthsLeft != null ? monthsLeft + ' months' : ''}</b> (~${Math.round(milesLeft / 500) * 500 > 0 ? (Math.round(milesLeft / 500) * 500).toLocaleString() : '<500'} mi)${rough ? ', a rough estimate' : ''}. Replace at 4/32″; 2/32″ is the legal minimum.`}
+      ${max - min >= 2 ? ' One end is wearing faster, so get the tires rotated now (free where you buy tires) to even them out.' : ''} Price tires at Costco or Discount Tire, not the dealer.</span>
+    </div></div>`;
+  }
+  let padText = '';
+  if (Object.keys(pd).length) {
+    const min = Math.min(...Object.values(pd).map((v) => v.mm));
+    const state = min <= 3 ? 'urgent' : min <= 4 ? 'soon' : 'good';
+    padText = `<div class="wear-row"><span class="sev ${state}"></span><div>
+      <b>Brake pads:</b> ${Object.entries(pd).map(([k, v]) => `${k} ${v.mm}${v.orMore ? '+' : ''} mm`).join(' · ')}<br>
+      <span class="small">${min <= 3 ? 'Replace soon (3 mm or less).' : min <= 4 ? 'Getting low. Plan pads at your next visit.' : 'Plenty of life left. Replace at 3 mm, or when they squeal.'}</span>
+    </div></div>`;
+  }
+  return `<div class="card wear"><h3>📏 Wear check</h3>${tireText}${padText}</div>`;
 }
 
 function planCard(items) {
@@ -241,7 +353,7 @@ function viewVehicle(vid, tab = 'due') {
   if (tab === 'due') {
     const tracked = items.filter((i) => i.status !== 'wait');
     const waiting = items.filter((i) => i.status === 'wait');
-    body = modeToggle() + notesCard(vid) + planCard(items) + tracked.map(itemCard).join('')
+    body = modeToggle() + inspectionCard(vid, items) + wearCard(vid, odo) + notesCard(vid) + planCard(items) + tracked.map(itemCard).join('')
       + (waiting.length ? `<h2>Can wait: go when you notice these signs</h2>${waiting.map(itemCard).join('')}` : '');
   } else if (tab === 'history') {
     body = `<div class="stats">
@@ -426,6 +538,8 @@ function renderEdit(manual) {
       </div>
     </fieldset>
 
+    ${d.inspection ? inspectionSummary(d.inspection) : ''}
+
     <label>Notes / recommendations from the shop
       <textarea id="notes" rows="3" placeholder="e.g. Front pads at 4mm — replace next visit">${esc(d.notes)}</textarea></label>
 
@@ -532,20 +646,28 @@ function applyReceiptText(manual, replace) {
   const d = draft;
   const p = parseReceipt(d.ocrText);
   const filled = [];
+  d.inspection = p.inspection || null;
+  if (p.inspection) {
+    // Recommended work wasn't done: record only the inspection, no cost.
+    d.services = ['inspection'];
+    d.total = '';
+  }
   if (p.vehicleId && (replace || !d.vehicleId)) { d.vehicleId = p.vehicleId; filled.push('vehicle'); }
   if (p.date) { d.date = p.date; filled.push('date'); }
   if (p.mileage && (replace || !d.mileage)) { d.mileage = p.mileage; filled.push('mileage'); }
   if (p.total) { d.total = p.total; filled.push('total'); }
   if (p.shop && (replace || !d.shop)) { d.shop = p.shop; filled.push('shop'); }
   if (p.notes && (replace || !d.notes)) { d.notes = p.notes; filled.push('shop notes'); }
-  if (p.services.length) {
+  if (p.services.length && !p.inspection) {
     d.services = replace ? p.services : [...new Set([...d.services, ...p.services])];
     filled.push(`${p.services.length} service${p.services.length > 1 ? 's' : ''}`);
   }
   renderEdit(manual);
   const s = document.getElementById('ocrStatus');
   if (s) {
-    s.innerHTML = filled.length
+    s.innerHTML = p.inspection
+      ? `✓ Read as a <b>dealer inspection</b>: ${p.inspection.recommendations.length} recommendations (not recorded as done)${Object.keys(p.inspection.tread).length ? ', tire tread' : ''}${Object.keys(p.inspection.pads).length ? ', brake pads' : ''}. After saving, the car's Schedule tab shows what's really needed.`
+      : filled.length
       ? `✓ Filled in ${filled.join(', ')}. Please check everything, especially the date and mileage, before saving.`
       : 'Couldn\'t pick out details automatically. Please fill in the form.';
   }
@@ -588,10 +710,11 @@ async function saveDraft() {
     id: d.id,
     vehicleId: d.vehicleId,
     date: d.date,
-    mileage: d.mileage === '' ? null : Number(d.mileage),
+    mileage: d.mileage === '' || d.mileage == null ? null : Number(d.mileage),
     shop: d.shop.trim(),
-    total: d.total === '' ? null : Number(d.total),
+    total: d.total === '' || d.total == null ? null : Number(d.total),
     services: d.services,
+    inspection: d.inspection || null,
     notes: d.notes.trim(),
     ocrText: d.ocrText,
     imageIds: keepIds,
@@ -629,6 +752,7 @@ async function viewRecord(id) {
       <h3>Services</h3>
       <ul class="svc-list">${r.services.map((s) => `<li>✓ ${esc(SERVICES[s]?.name || s)}</li>`).join('')}</ul>
       ${r.notes ? `<h3>Notes</h3><p class="pre">${esc(r.notes)}</p>` : ''}
+      ${r.inspection ? inspectionSummary(r.inspection) : ''}
     </div>
     ${imgs.map((u, i) => `<a href="${u}" target="_blank" rel="noopener"><img class="receipt-img" src="${u}" alt="Receipt page ${i + 1}"></a>`).join('')}
     ${r.ocrText ? `<details><summary>Receipt text</summary><pre class="ocr">${esc(r.ocrText)}</pre></details>` : ''}
