@@ -1,6 +1,7 @@
 // Works out when each maintenance item is next due for a vehicle.
 
 import { SCHEDULES, SERVICES, VEHICLES } from './data.js';
+import { ESSENTIALS, DIY } from './essentials.js';
 
 const DAY = 86400000;
 export const SOON_MILES = 1000;
@@ -49,20 +50,30 @@ export function odometer(records, vehicleId, manual) {
   return { miles: est, lastReading: last.miles, lastDate: last.date, estimated: daysSince > 7, perYear, rateKnown };
 }
 
-export function scheduleFor(vehicleId, overrides = {}) {
+// mode: 'full' (manufacturer schedule) or 'essential' (only what matters, stretched where safe).
+// User overrides always win over both.
+export function scheduleFor(vehicleId, overrides = {}, mode = 'full') {
   return (SCHEDULES[vehicleId] || []).map((item) => {
+    const ess = (ESSENTIALS[vehicleId] || {})[item.service] || { tier: 'essential' };
+    let it = { ...item, tier: ess.tier, wait: ess.wait, diy: DIY[item.service] || null };
+    if (mode === 'essential') {
+      if ('miles' in ess) it.miles = ess.miles;
+      if ('months' in ess) it.months = ess.months;
+      if ('miles' in ess || 'months' in ess) it.stretched = true;
+    }
     const o = overrides[item.service];
-    return o ? { ...item, ...o, customized: true } : item;
+    if (o) it = { ...it, ...o, customized: true };
+    return it;
   });
 }
 
 // inService: ISO date the vehicle was first sold/registered (approximation).
-export function dueItems(vehicleId, records, odo, overrides, inService) {
+export function dueItems(vehicleId, records, odo, overrides, inService, mode = 'full') {
   const recs = vehicleRecords(records, vehicleId);
   const now = today();
   const curMiles = odo.miles;
 
-  return scheduleFor(vehicleId, overrides).map((item) => {
+  return scheduleFor(vehicleId, overrides, mode).map((item) => {
     const done = recs.filter((r) => (r.services || []).includes(item.service));
     const last = done[0] || null;
     const count = done.length;
@@ -94,6 +105,8 @@ export function dueItems(vehicleId, records, odo, overrides, inService) {
     else if (overdue) status = 'overdue';
     else if (soon) status = 'soon';
     else status = 'ok';
+    // In Essentials mode, "can wait" items are not scheduled — just watched for warning signs.
+    if (mode === 'essential' && item.tier === 'wait') status = 'wait';
 
     // Which limit comes first (for sorting).
     const candidates = [dueDate, mileDate].filter(Boolean);
@@ -105,7 +118,7 @@ export function dueItems(vehicleId, records, odo, overrides, inService) {
       last, count, dueMiles, dueDate, milesLeft, daysLeft, status, effectiveDate,
     };
   }).sort((a, b) => {
-    const rank = { overdue: 0, soon: 1, norecord: 2, ok: 3 };
+    const rank = { overdue: 0, soon: 1, norecord: 2, ok: 3, wait: 4 };
     if (rank[a.status] !== rank[b.status]) return rank[a.status] - rank[b.status];
     return (a.effectiveDate || Infinity) - (b.effectiveDate || Infinity);
   });
@@ -115,4 +128,22 @@ export function defaultInService(vehicleId) {
   const v = VEHICLES.find((x) => x.id === vehicleId);
   // Model years usually go on sale in the fall of the prior year; mid-year is a fair default.
   return `${v.year - 1}-10-01`;
+}
+
+// Group what's coming up into one shop trip plus a do-it-yourself list,
+// so you go to the shop as rarely as possible.
+export const BUNDLE_DAYS = 120;
+export function planVisits(items, mode) {
+  const tracked = items.filter((i) => i.status !== 'wait' && i.effectiveDate);
+  const isDiy = (i) => i.tier === 'diy';
+  const shop = tracked.filter((i) => !isDiy(i)).sort((a, b) => a.effectiveDate - b.effectiveDate);
+  let visit = null;
+  if (shop.length) {
+    const now = today();
+    const first = shop[0].effectiveDate < now ? now : shop[0].effectiveDate;
+    const cutoff = new Date(first.getTime() + BUNDLE_DAYS * DAY);
+    visit = { date: first, overdue: shop[0].effectiveDate <= now, items: shop.filter((i) => i.effectiveDate <= cutoff) };
+  }
+  const diy = tracked.filter((i) => isDiy(i) && ['overdue', 'soon', 'norecord'].includes(i.status));
+  return { visit, diy, mode };
 }

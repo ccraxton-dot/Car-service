@@ -211,3 +211,24 @@ pre.ocr { white-space: pre-wrap; font-size: .78rem; background: var(--card); bor
 
 .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent-blue); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 4px; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* schedule mode + essentials */
+.mode { margin-bottom: 12px; }
+.mode-tabs { margin-bottom: 6px; }
+.mode-tabs button { flex: 1; font: inherit; font-weight: 600; font-size: .92rem; padding: 8px; border: none; border-radius: 9px; background: transparent; color: var(--muted); cursor: pointer; }
+.mode-tabs button.active { background: var(--primary); color: var(--primary-text); }
+.mode-help { margin: 0 4px; }
+.tag.diy { color: var(--ok); border-color: var(--ok); }
+.tag.wait { color: var(--norec); }
+.item.status-wait { border-left-color: var(--line); }
+.wait-box { font-size: .88rem; margin: 2px 0 6px; }
+.item-actions { margin-top: 8px; text-align: right; }
+button.link { background: none; border: none; padding: 4px 0; font: inherit; font-size: .85rem; font-weight: 600; color: var(--accent-blue); cursor: pointer; }
+.diy-box { margin: 8px 0 0; border-top: 1px solid var(--line); padding-top: 8px; }
+.diy-box summary { font-size: .85rem; color: var(--text); font-weight: 600; }
+.diy-box p { margin: 6px 0 0; font-size: .85rem; color: var(--muted); }
+.plan { border: 2px solid var(--primary); }
+.plan h3 { margin: 0 0 4px; }
+.plan h3 + p { margin: 0 0 4px; }
+.plan-list { margin: 4px 0 10px; padding-left: 20px; font-size: .92rem; }
+.plan-list li { margin-bottom: 3px; }

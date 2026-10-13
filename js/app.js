@@ -1,7 +1,8 @@
 import { VEHICLES, SERVICES, SCHEDULES, TIPS, GENERAL_TIPS } from './data.js';
 import * as db from './db.js';
 import { parseReceipt, toISODate } from './parse.js';
-import { odometer, dueItems, vehicleRecords, defaultInService, scheduleFor } from './schedule.js';
+import { odometer, dueItems, vehicleRecords, defaultInService, scheduleFor, planVisits } from './schedule.js';
+import { SAVE_MONEY_TIPS } from './essentials.js';
 
 const app = document.getElementById('app');
 const state = { records: [], settings: {} };
@@ -40,10 +41,91 @@ async function saveSetting(key, value) {
   await db.setSetting(key, value);
 }
 
+// 'essential' = only what matters (default), 'full' = manufacturer schedule.
+const mode = () => setting('mode', 'essential');
+
 function vehicleStatus(vid) {
   const odo = odometer(state.records, vid, setting(`odo:${vid}`));
-  const items = dueItems(vid, state.records, odo, setting(`intervals:${vid}`, {}), setting(`inService:${vid}`, defaultInService(vid)));
+  const items = dueItems(vid, state.records, odo, setting(`intervals:${vid}`, {}), setting(`inService:${vid}`, defaultInService(vid)), mode());
   return { odo, items };
+}
+
+function modeToggle() {
+  const m = mode();
+  return `<div class="mode">
+    <div class="tabs mode-tabs" role="group" aria-label="Schedule mode">
+      <button data-mode="essential" class="${m === 'essential' ? 'active' : ''}">Essentials only</button>
+      <button data-mode="full" class="${m === 'full' ? 'active' : ''}">Full schedule</button>
+    </div>
+    <p class="muted small mode-help">${m === 'essential'
+      ? 'Showing only what prevents expensive damage or safety problems, with intervals stretched where it\'s safe. Everything else is listed as "can wait" with the warning signs to watch for.'
+      : 'Showing the full manufacturer-style schedule. Switch to Essentials only to cut shop visits to what matters.'}</p>
+  </div>`;
+}
+
+function bindModeToggle() {
+  app.querySelectorAll('[data-mode]').forEach((b) => {
+    b.onclick = async () => { await saveSetting('mode', b.dataset.mode); render(); };
+  });
+}
+
+const TIER_TAG = { essential: '', diy: '<span class="tag diy">DIY</span>', wait: '<span class="tag wait">can wait</span>' };
+const LEVEL_LABEL = { easy: 'Easy DIY', moderate: 'Doable DIY', shop: 'Shop job' };
+
+function diyBlock(it) {
+  const d = it.diy;
+  if (!d) return '';
+  const title = d.level === 'shop' ? 'Save money' : `${LEVEL_LABEL[d.level]} · ${esc(d.time)}`;
+  const cost = d.level === 'shop' ? esc(d.shop) : `Parts ${esc(d.part)} vs shop ${esc(d.shop)}`;
+  return `<details class="diy-box"><summary>🛠 ${title} <span class="muted">· ${cost}</span></summary><p>${esc(d.how)}</p></details>`;
+}
+
+function itemCard(it) {
+  const m = mode();
+  const intervalTxt = [it.miles ? it.miles.toLocaleString() + ' mi' : '', it.months ? it.months + ' mo' : ''].filter(Boolean).join(' / ') || '—';
+  const firstTxt = it.firstMiles || it.firstMonths ? ` (first at ${[it.firstMiles ? it.firstMiles.toLocaleString() + ' mi' : '', it.firstMonths ? it.firstMonths / 12 + ' yr' : ''].filter(Boolean).join(' / ')})` : '';
+  const lastTxt = it.last ? `Last done ${fmtDate(it.last.date)}${it.last.mileage ? ' @ ' + fmtMiles(it.last.mileage) : ''}` : 'No record yet';
+  if (it.status === 'wait') {
+    return `<div class="card item status-wait">
+      <div class="item-head"><span class="item-name">${esc(it.name)}</span><button class="link" data-edit="${it.service}">Log / edit</button></div>
+      <div class="wait-box">${esc(it.wait)}</div>
+      <div class="muted small">${lastTxt}</div>
+      ${diyBlock(it)}
+    </div>`;
+  }
+  return `<div class="card item status-${it.status}">
+    <div class="item-head">
+      <span class="item-name">${esc(it.name)}${it.action === 'inspect' ? ' <span class="tag">inspect</span>' : ''}${TIER_TAG[it.tier] || ''}${it.customized ? ' <span class="tag">custom</span>' : ''}</span>
+      <span class="pill ${it.status}">${STATUS_LABEL[it.status]}</span>
+    </div>
+    <div class="small">${esc(dueText(it))}${it.status !== 'norecord' && leftText(it) ? ` · <b>${esc(leftText(it))}</b>` : ''}</div>
+    <div class="muted small">Every ${intervalTxt}${firstTxt}${it.stretched && m === 'essential' && !it.customized ? ' (essentials interval)' : ''} · ${lastTxt}</div>
+    ${it.status === 'norecord' ? '<div class="small warn">No record on file. If it has never been done (or you don\'t know when), it\'s probably due. Add a receipt or log it to start tracking.</div>' : ''}
+    ${m === 'essential' && it.wait ? `<div class="note"><b>Why it matters / can it wait?</b> ${esc(it.wait)}</div>` : ''}
+    ${m === 'full' && it.note ? `<div class="note">${esc(it.note)}</div>` : ''}
+    ${m === 'full' && it.tier === 'wait' && it.wait ? `<div class="note"><b>Can it wait?</b> ${esc(it.wait)}</div>` : ''}
+    ${diyBlock(it)}
+    <div class="item-actions"><button class="link" data-edit="${it.service}">Change interval / log as done</button></div>
+  </div>`;
+}
+
+function whenText(d, overdue) {
+  if (overdue) return 'now (something is overdue)';
+  const days = Math.round((d - new Date()) / 86400000);
+  if (days <= 31) return `within ${Math.max(days, 1)} days (by ${fmtDate(d)})`;
+  return `around ${d.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}`;
+}
+
+function planCard(items) {
+  const { visit, diy } = planVisits(items, mode());
+  if (!visit && !diy.length) return '';
+  return `<div class="card plan">
+    ${visit ? `<h3>🔧 Next shop visit: ${esc(whenText(visit.date, visit.overdue))}</h3>
+      <p class="small muted">Get all of these done in the same trip:</p>
+      <ul class="plan-list">${visit.items.map((i) => `<li>${esc(i.name)} <span class="muted small">· ${i.status === 'norecord' ? 'no record' : esc(leftText(i) || dueText(i))}</span></li>`).join('')}</ul>` : ''}
+    ${visit && visit.items.some((i) => i.status === 'norecord') ? '<p class="small muted">Already had some of these done? Tap <b>Change interval / log as done</b> on that item (or add the receipt) and it will drop off this list.</p>' : ''}
+    ${diy.length ? `<h3>🛠 Do yourself</h3><ul class="plan-list">${diy.map((i) => `<li>${esc(i.name)} <span class="muted small">· ${i.diy ? esc(i.diy.time) + ', saves ~' + esc(i.diy.shop) : ''}</span></li>`).join('')}</ul>` : ''}
+  </div>`;
 }
 
 function dueText(it) {
@@ -66,7 +148,7 @@ function leftText(it) {
   return parts.join(' · ');
 }
 
-const STATUS_LABEL = { overdue: 'Overdue', soon: 'Due soon', ok: 'OK', norecord: 'No record' };
+const STATUS_LABEL = { overdue: 'Overdue', soon: 'Due soon', ok: 'OK', norecord: 'No record', wait: 'Can wait' };
 
 // ---------- views ----------
 function header(title, back) {
@@ -83,7 +165,7 @@ function viewHome() {
     const overdue = items.filter((i) => i.status === 'overdue').length;
     const soon = items.filter((i) => i.status === 'soon').length;
     const norec = items.filter((i) => i.status === 'norecord').length;
-    const next = items.find((i) => i.status !== 'norecord');
+    const next = items.find((i) => i.status !== 'norecord' && i.status !== 'wait');
     const recs = vehicleRecords(state.records, v.id);
     return `<a class="card vehicle" href="#/v/${v.id}" style="--accent:${v.color}">
       <div class="vehicle-top">
@@ -108,11 +190,13 @@ function viewHome() {
 
   app.innerHTML = `${header('Car Service')}
   <main>
+    ${modeToggle()}
     ${cards}
     <h2>Recent services</h2>
     ${recent.length ? recent.map(recordRow).join('') : '<p class="empty">No receipts yet. Tap <b>＋ Receipt</b> to snap your first one.</p>'}
   </main>
   <a class="fab" href="#/add">＋ Receipt</a>`;
+  bindModeToggle();
 }
 
 function recordRow(r) {
@@ -136,18 +220,10 @@ function viewVehicle(vid, tab = 'due') {
 
   let body = '';
   if (tab === 'due') {
-    body = items.map((it) => `
-      <button class="card item status-${it.status}" data-edit="${it.service}">
-        <div class="item-head">
-          <span class="item-name">${esc(it.name)}${it.action === 'inspect' ? ' <span class="tag">inspect</span>' : ''}${it.customized ? ' <span class="tag">custom</span>' : ''}</span>
-          <span class="pill ${it.status}">${STATUS_LABEL[it.status]}</span>
-        </div>
-        <div class="small">${esc(dueText(it))}${it.status !== 'norecord' && leftText(it) ? ` · <b>${esc(leftText(it))}</b>` : ''}</div>
-        <div class="muted small">Every ${[it.miles ? it.miles.toLocaleString() + ' mi' : '', it.months ? it.months + ' mo' : ''].filter(Boolean).join(' / ') || '—'}${it.firstMiles || it.firstMonths ? ` (first at ${[it.firstMiles ? it.firstMiles.toLocaleString() + ' mi' : '', it.firstMonths ? it.firstMonths / 12 + ' yr' : ''].filter(Boolean).join(' / ')})` : ''}
-          · ${it.last ? `Last done ${fmtDate(it.last.date)}${it.last.mileage ? ' @ ' + fmtMiles(it.last.mileage) : ''}` : 'No record yet'}</div>
-        ${it.status === 'norecord' ? '<div class="small warn">No record on file. If it has never been done (or you don\'t know when), it is probably due. Add a receipt or log it to start tracking.</div>' : ''}
-        ${it.note ? `<div class="note">${esc(it.note)}</div>` : ''}
-      </button>`).join('');
+    const tracked = items.filter((i) => i.status !== 'wait');
+    const waiting = items.filter((i) => i.status === 'wait');
+    body = modeToggle() + planCard(items) + tracked.map(itemCard).join('')
+      + (waiting.length ? `<h2>Can wait: go when you notice these signs</h2>${waiting.map(itemCard).join('')}` : '');
   } else if (tab === 'history') {
     body = `<div class="stats">
         <div><b>${recs.length}</b><span>visits</span></div>
@@ -157,7 +233,8 @@ function viewVehicle(vid, tab = 'due') {
       ${recs.length ? recs.map(recordRow).join('') : '<p class="empty">No service records for this vehicle yet.</p>'}`;
   } else {
     body = (TIPS[vid] || []).map((t) => `<div class="card tip"><h3>${esc(t.title)}</h3><p>${esc(t.body)}</p></div>`).join('')
-      + `<h2>Good habits for every car</h2><ul class="tips">${GENERAL_TIPS.map((t) => `<li>${esc(t)}</li>`).join('')}</ul>
+      + `<h2>Spend less, visit the shop less</h2><ul class="tips">${SAVE_MONEY_TIPS.map((t) => `<li>${esc(t)}</li>`).join('')}</ul>
+      <h2>Good habits for every car</h2><ul class="tips">${GENERAL_TIPS.map((t) => `<li>${esc(t)}</li>`).join('')}</ul>
       <p class="muted small">Intervals are typical normal-driving recommendations from manufacturer schedules and common practice. Your owner's manual (or the Kia/Nissan owner portal for your VIN) is the final word. Tap any item on the Schedule tab to change its interval.</p>`;
   }
 
@@ -182,6 +259,7 @@ function viewVehicle(vid, tab = 'due') {
 
   document.getElementById('odoBtn').onclick = () => editOdometer(vid, odo);
   app.querySelectorAll('[data-edit]').forEach((b) => { b.onclick = () => editInterval(vid, b.dataset.edit); });
+  bindModeToggle();
 }
 
 function sheet(html, onMount) {
@@ -213,10 +291,10 @@ function editOdometer(vid, odo) {
 }
 
 function editInterval(vid, serviceId) {
-  const base = SCHEDULES[vid].find((s) => s.service === serviceId);
-  const cur = scheduleFor(vid, setting(`intervals:${vid}`, {})).find((s) => s.service === serviceId);
+  const base = scheduleFor(vid, {}, mode()).find((s) => s.service === serviceId);
+  const cur = scheduleFor(vid, setting(`intervals:${vid}`, {}), mode()).find((s) => s.service === serviceId);
   sheet(`<h3>${esc(SERVICES[serviceId].name)}</h3>
-    <p class="muted small">Default: every ${base.miles ? base.miles.toLocaleString() + ' mi' : '—'} / ${base.months ? base.months + ' months' : '—'}</p>
+    <p class="muted small">${mode() === 'essential' ? 'Essentials' : 'Full schedule'} default: every ${base.miles ? base.miles.toLocaleString() + ' mi' : '—'} / ${base.months ? base.months + ' months' : '—'}</p>
     <div class="row">
       <label>Miles<input type="number" inputmode="numeric" id="mi" value="${cur.miles ?? ''}" placeholder="none"></label>
       <label>Months<input type="number" inputmode="numeric" id="mo" value="${cur.months ?? ''}" placeholder="none"></label>
@@ -567,6 +645,8 @@ function exportCSV() {
 function viewSettings() {
   app.innerHTML = `${header('Settings & backup', '#/')}
   <main>
+    <h2>Schedule mode</h2>
+    ${modeToggle()}
     <div class="card">
       <h3>Your data lives on this phone</h3>
       <p class="small">Receipts and records are stored privately in this browser on this device. Nothing is uploaded. Export a backup now and then (save it to Files, iCloud Drive or Google Drive) so you don't lose your history if you clear browser data or change phones.</p>
@@ -585,6 +665,7 @@ function viewSettings() {
     </div>
     <p class="muted small center">${state.records.length} records stored</p>
   </main>`;
+  bindModeToggle();
   document.getElementById('exp').onclick = exportBackup;
   document.getElementById('csv').onclick = exportCSV;
   document.getElementById('imp').onchange = (e) => e.target.files[0] && importBackup(e.target.files[0]);
