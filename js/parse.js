@@ -32,32 +32,69 @@ function validDate(y, m, d) {
   return dt;
 }
 
-export function detectDate(text) {
-  const candidates = [];
+// Dates on a receipt that are NOT the service date.
+const OTHER_DATE = /(deliv|in[\s-]*serv|warrant|prod(uction)?\b|prod\.? ?date|sold|purchas|expir|\bexp\b|next|due\b|recommend|remind|birth|\bdob\b|valid|since|start|member|reg(istration)?\b|cert)/i;
+// Labels that usually sit next to the service date.
+const SERVICE_DATE = /(date|invoice|\binv\b|\br\.?\s?o\b|repair order|work order|opened|closed|complet|ready|printed|visit|served|time\s*in|in\s*time)/i;
+
+function monthIndex(name) {
+  return MONTHS.indexOf(name.toLowerCase().slice(0, 3)) + 1;
+}
+
+function datesInLine(raw) {
+  // Fix common OCR slips inside numbers: O→0, l/I→1, and spaces around separators.
+  const line = raw
+    .replace(/(?<=\d)[Oo](?=[\d\/\-.])|(?<=[\d\/\-.])[Oo](?=\d)/g, '0')
+    .replace(/(?<=\d)[lI|](?=[\d\/\-.])|(?<=[\d\/\-.])[lI|](?=\d)/g, '1')
+    .replace(/(\d)\s*([\/\-.])\s*(?=\d)/g, '$1$2');
+  const found = [];
   let m;
-  // 10/13/2026, 10-13-26, 10.13.2026
-  const re1 = /\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\b/g;
-  while ((m = re1.exec(text))) {
-    const d = validDate(+m[3], +m[1], +m[2]);
-    if (d) candidates.push(d);
+  // 10/13/2026, 10-13-26, 10.13.2026 (US month first; falls back to day first)
+  const re1 = /(?<![\d\/\-.])(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4}|\d{2})(?![\d\/\-.])/g;
+  while ((m = re1.exec(line))) {
+    const d = validDate(+m[3], +m[1], +m[2]) || validDate(+m[3], +m[2], +m[1]);
+    if (d) found.push(d);
   }
   // 2026-10-13
   const re2 = /\b(20\d{2})[\/\-.](\d{1,2})[\/\-.](\d{1,2})\b/g;
-  while ((m = re2.exec(text))) {
+  while ((m = re2.exec(line))) {
     const d = validDate(+m[1], +m[2], +m[3]);
-    if (d) candidates.push(d);
+    if (d) found.push(d);
   }
-  // Oct 13, 2026
-  const re3 = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})\b/gi;
-  while ((m = re3.exec(text))) {
-    const d = validDate(+m[3], MONTHS.indexOf(m[1].toLowerCase().slice(0, 3)) + 1, +m[2]);
-    if (d) candidates.push(d);
+  // Oct 13, 2026 · October 13 2026 · Oct. 13, 26
+  const re3 = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s*(\d{1,2})(?!\d)(?:st|nd|rd|th)?,?\s*'?(\d{4}|\d{2})\b/gi;
+  while ((m = re3.exec(line))) {
+    const d = validDate(+m[3], monthIndex(m[1]), +m[2]);
+    if (d) found.push(d);
   }
+  // 13 Oct 2026 · 13-OCT-26 · 13OCT26 (dealer systems)
+  const re4 = /\b(\d{1,2})[\s\-]?(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?[\s\-,]?'?(\d{4}|\d{2})\b/gi;
+  while ((m = re4.exec(line))) {
+    const d = validDate(+m[3], monthIndex(m[2]), +m[1]);
+    if (d) found.push(d);
+  }
+  return found;
+}
+
+export function detectDate(text) {
+  const lines = text.split('\n');
+  const candidates = [];
+  lines.forEach((line, i) => {
+    const dates = datesInLine(line);
+    if (!dates.length) return;
+    // A label can sit alone on the line above the date ("Invoice Date" / "10/13/26").
+    const prev = lines[i - 1] || '';
+    const label = datesInLine(prev).length ? '' : prev;
+    const context = line + ' ' + label;
+    if (OTHER_DATE.test(line) || (!SERVICE_DATE.test(line) && OTHER_DATE.test(label))) return;
+    const score = SERVICE_DATE.test(context) ? 2 : 1;
+    for (const d of dates) candidates.push({ d, score });
+  });
   if (!candidates.length) return null;
-  // The service date is usually the earliest date printed (later ones tend
-  // to be "next service due" reminders).
-  candidates.sort((a, b) => a - b);
-  return toISODate(candidates[0]);
+  // Prefer labelled dates; among equals, the most recent one (the visit itself,
+  // not an older date such as when the car was bought).
+  candidates.sort((a, b) => b.score - a.score || b.d - a.d);
+  return toISODate(candidates[0].d);
 }
 
 export function toISODate(d) {

@@ -381,6 +381,7 @@ function renderEdit(manual) {
           <input type="file" accept="image/*" capture="environment" id="cam" hidden></label>
         <label class="btn ghost">🖼 Library<input type="file" accept="image/*" id="lib" multiple hidden></label>
       </div>
+      <button type="button" class="link" id="pasteBtn">📋 Paste receipt text instead</button>
       <div id="ocrStatus" class="muted small"></div>
     </section>`}
 
@@ -429,6 +430,8 @@ function renderEdit(manual) {
   app.querySelectorAll('[data-rm]').forEach((b) => {
     b.onclick = () => { d.images.splice(+b.dataset.rm, 1); renderEdit(manual); };
   });
+  const pasteBtn = document.getElementById('pasteBtn');
+  if (pasteBtn) pasteBtn.onclick = () => pasteText(manual);
   for (const id of ['cam', 'lib']) {
     const input = document.getElementById(id);
     if (input) input.onchange = () => handleFiles([...input.files], manual);
@@ -497,22 +500,51 @@ async function handleFiles(files, manual) {
       text += data.text + '\n';
     }
     d.ocrText = (d.ocrText ? d.ocrText + '\n' : '') + text.trim();
-    const p = parseReceipt(d.ocrText);
-    const filled = [];
-    if (p.vehicleId && !d.vehicleId) { d.vehicleId = p.vehicleId; filled.push('vehicle'); }
-    if (p.date) { d.date = p.date; filled.push('date'); }
-    if (p.mileage && !d.mileage) { d.mileage = p.mileage; filled.push('mileage'); }
-    if (p.total) { d.total = p.total; filled.push('total'); }
-    if (p.shop && !d.shop) { d.shop = p.shop; filled.push('shop'); }
-    if (p.services.length) { d.services = [...new Set([...d.services, ...p.services])]; filled.push(`${p.services.length} service${p.services.length > 1 ? 's' : ''}`); }
-    renderEdit(manual);
-    setStatus(filled.length
-      ? `✓ Filled in ${filled.join(', ')}. Please check everything, especially mileage, before saving.`
-      : 'Couldn\'t pick out details automatically. Please fill in the form. The photo is still saved.');
+    applyReceiptText(manual, false);
   } catch (err) {
     console.error(err);
     setStatus(`⚠︎ ${esc(err.message || 'Text reading failed')}. You can still fill in the form by hand. The photo is saved with the record.`);
   }
+}
+
+// Fill the form from d.ocrText. With `replace`, detected values overwrite what's
+// already there (used for pasted text, so you can paste again to retry).
+function applyReceiptText(manual, replace) {
+  const d = draft;
+  const p = parseReceipt(d.ocrText);
+  const filled = [];
+  if (p.vehicleId && (replace || !d.vehicleId)) { d.vehicleId = p.vehicleId; filled.push('vehicle'); }
+  if (p.date) { d.date = p.date; filled.push('date'); }
+  if (p.mileage && (replace || !d.mileage)) { d.mileage = p.mileage; filled.push('mileage'); }
+  if (p.total) { d.total = p.total; filled.push('total'); }
+  if (p.shop && (replace || !d.shop)) { d.shop = p.shop; filled.push('shop'); }
+  if (p.services.length) {
+    d.services = replace ? p.services : [...new Set([...d.services, ...p.services])];
+    filled.push(`${p.services.length} service${p.services.length > 1 ? 's' : ''}`);
+  }
+  renderEdit(manual);
+  const s = document.getElementById('ocrStatus');
+  if (s) {
+    s.innerHTML = filled.length
+      ? `✓ Filled in ${filled.join(', ')}. Please check everything, especially the date and mileage, before saving.`
+      : 'Couldn\'t pick out details automatically. Please fill in the form.';
+  }
+}
+
+function pasteText(manual) {
+  sheet(`<h3>Paste receipt text</h3>
+    <p class="muted small">On iPhone: open the receipt photo, press and hold on the text, then tap Select All → Copy. Android: open the photo in Google Photos or Lens, then tap Text → Copy.</p>
+    <label>Receipt text<textarea id="pasted" rows="10" placeholder="Paste the receipt text here"></textarea></label>
+    <div class="row"><button class="btn ghost" data-close>Cancel</button><button class="btn" id="readText">Read text</button></div>`,
+  (el, close) => {
+    el.querySelector('#readText').onclick = () => {
+      const text = el.querySelector('#pasted').value.trim();
+      if (!text) return toast('Paste some text first');
+      draft.ocrText = text;
+      close();
+      applyReceiptText(manual, true);
+    };
+  });
 }
 
 async function saveDraft() {
