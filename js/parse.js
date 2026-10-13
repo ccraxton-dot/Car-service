@@ -119,11 +119,13 @@ function mileageValue(str) {
 export function detectMileage(text) {
   const lines = splitLines(text);
   const labelled = /(mileage|odometer|odo\b|miles\s*in|mi\s*in|in\s*miles|km\s*in|current\s*miles)/i;
-  const skip = /(next|due|recommend|return|out\b)/i;
+  const skip = /(next|due|recommend|return)/i;
   // 1. "Mileage In: 41,236" on one line, or the number on the next line.
+  // With "In: 57244 / Out: 57244", only look before "Out".
   for (let i = 0; i < lines.length; i++) {
     if (!labelled.test(lines[i]) || skip.test(lines[i])) continue;
-    const val = mileageValue(lines[i]) ?? (/^[\d,]+$/.test(lines[i + 1] || '') ? mileageValue(lines[i + 1]) : null);
+    const before = lines[i].split(/\bout\b/i)[0];
+    const val = mileageValue(before) ?? (/^[\d,]+$/.test(lines[i + 1] || '') ? mileageValue(lines[i + 1]) : null);
     if (val) return val;
   }
   // 2. A bare number just after the license plate or VIN (vehicle info block).
@@ -146,7 +148,7 @@ const MONEY = /\(?\$?\s?(\d{1,5}(?:,\d{3})*\.\d{2})\)?/g;
 export function detectTotal(text) {
   const lines = splitLines(text);
   const label = /(\btotal\b|amount due|balance due|grand|amount paid|pay this|total due)/i;
-  const notTotal = /sub\s*-?total|\btax\b|labor\s*total|parts\s*total|savings|discount/i;
+  const notTotal = /sub\s*-?total|\btax\b|labor\s*total|parts\s*total|total\s*(jobs|fees|labor|parts|savings)|savings|discount/i;
   let best = null;
   for (let i = 0; i < lines.length; i++) {
     if (!label.test(lines[i]) || notTotal.test(lines[i])) continue;
@@ -155,6 +157,8 @@ export function detectTotal(text) {
     if (!amts && /^\(?\$?\s?[\d,]+\.\d{2}\)?$/.test(lines[i + 1] || '')) amts = lines[i + 1].match(MONEY);
     if (!amts) continue;
     const v = +amts[amts.length - 1].replace(/[$,()\s]/g, '');
+    // "Balance due: $0.00" on a paid invoice isn't the cost of the visit.
+    if (v === 0) continue;
     // "Amount Due Today" / "Total" usually agree; the last labelled amount wins.
     best = v;
   }
@@ -224,8 +228,8 @@ export function detectServices(text) {
 }
 
 // Technician comments and recommendations ("oil filter housing cap damaged").
-const CONCERN = /(damag|leak|seep|worn|wear\b|crack|torn|broken|cracked|recommend|advis|suggest|needs?\b|replace soon|soon\b|low\b|failing|weak|noise|vibrat|corro|rust|loose|missing|bad\b|check\b.*\b(cap|leak|noise|light))/i;
-const BOILERPLATE = /(guarantee|privacy|policy|claim|signature|waive|reimburse|approve|warranty|thank|visit|scan|qr code|www\.|http|procedure|terms|disclaimer)/i;
+const CONCERN = /(damag|leak|seep|worn|wear\b|crack|torn|broken|cracked|recommend|\badvis(e|ed)\b|suggest|needs?\b|replace soon|soon\b|low\b|failing|weak|noise|vibrat|corro|rust|loose|missing|bad\b|check\b.*\b(cap|leak|noise|light))/i;
+const BOILERPLATE = /(service advisor|guarantee|privacy|policy|claim|signature|waive|reimburse|approve|warranty|thank|visit|scan|qr code|www\.|http|procedure|terms|disclaimer)/i;
 const CHECKLIST_LABEL = /^(battery|lights|belts|hoses|wipers?|wiper blades|tires?|tire pressures?|brake fluid|washer fluid|coolant reservoir|air filter)$/i;
 
 export function detectNotes(text) {

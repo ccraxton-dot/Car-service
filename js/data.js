@@ -42,6 +42,7 @@ export const VEHICLES = [
 export const SERVICES = {
   oil: {
     name: 'Engine oil & filter',
+    exclude: ['oil changers', 'oilchangers'],
     keywords: ['oil change', 'oil & filter', 'oil and filter', 'oil/filter', 'oil filter', 'lube oil', 'lof', 'synthetic', 'full syn', 'syn blend', '0w-20', '0w20', '5w-20', '5w20', '5w-30', '5w30', '0w-16', '0w-30'],
   },
   tire_rotation: {
