@@ -645,6 +645,7 @@ async function handleFiles(files, manual) {
 function applyReceiptText(manual, replace) {
   const d = draft;
   const p = parseReceipt(d.ocrText);
+  if (p.history) return showHistory(manual, p);
   const filled = [];
   d.inspection = p.inspection || null;
   if (p.inspection) {
@@ -665,12 +666,52 @@ function applyReceiptText(manual, replace) {
   renderEdit(manual);
   const s = document.getElementById('ocrStatus');
   if (s) {
-    s.innerHTML = p.inspection
+    s.innerHTML = p.otherVehicle
+      ? `<span class="warn">⚠︎ This looks like a different vehicle: <b>${esc(p.otherVehicle.description || 'unknown vehicle')}</b> (VIN ${esc(p.otherVehicle.vin)}). It doesn't match any of your three cars, so the vehicle was left blank. Don't save it unless it's really for one of your cars.</span>`
+      : p.inspection
       ? `✓ Read as a <b>dealer inspection</b>: ${p.inspection.recommendations.length} recommendations (not recorded as done)${Object.keys(p.inspection.tread).length ? ', tire tread' : ''}${Object.keys(p.inspection.pads).length ? ', brake pads' : ''}. After saving, the car's Schedule tab shows what's really needed.`
       : filled.length
       ? `✓ Filled in ${filled.join(', ')}. Please check everything, especially the date and mileage, before saving.`
       : 'Couldn\'t pick out details automatically. Please fill in the form.';
   }
+}
+
+// A vehicle history report (AutoCheck / Carfax): offer to import past visits
+// and the real in-service date instead of saving it as one record.
+function showHistory(manual, p) {
+  const d = draft;
+  const h = p.history;
+  if (p.vehicleId) d.vehicleId = p.vehicleId;
+  renderEdit(manual);
+  const s = document.getElementById('ocrStatus');
+  if (!s) return;
+  const v = vehicle(d.vehicleId);
+  const existing = vehicleRecords(state.records, d.vehicleId);
+  const fresh = h.visits.filter((x) => !existing.some((r) => r.date === x.date));
+  s.innerHTML = `<div class="card history-import">
+    <h3>📜 Vehicle history report${v ? ` · ${esc(vName(v))}` : ''}</h3>
+    ${h.inService ? `<p class="small">In service since <b>${fmtDate(h.inService)}</b>. Time-based items will count from this date.</p>` : ''}
+    <p class="small">${h.visits.length} past service visit${h.visits.length === 1 ? '' : 's'} found${fresh.length < h.visits.length ? ` (${h.visits.length - fresh.length} already in the app)` : ''}:</p>
+    <ul class="plan-list">${h.visits.map((x) => `<li>${fmtDate(x.date)}${x.mileage ? ' · ' + fmtMiles(x.mileage) : ''} <span class="muted small">· ${x.services.map((id) => esc(SERVICES[id].name)).join(', ')}</span></li>`).join('')}</ul>
+    <p class="muted small">History reports only say things like "Battery serviced" or "Transmission serviced". That can mean a check rather than a replacement, so treat these as approximate.</p>
+    ${v ? `<button class="btn full" id="importHistory">Import ${fresh.length} visit${fresh.length === 1 ? '' : 's'}${h.inService ? ' + in-service date' : ''}</button>` : '<p class="warn small">Choose the vehicle above first, then paste again.</p>'}
+  </div>`;
+  const btn = document.getElementById('importHistory');
+  if (btn) btn.onclick = async () => {
+    for (const x of fresh) {
+      await db.put('records', {
+        id: uid(), vehicleId: d.vehicleId, date: x.date, mileage: x.mileage, shop: x.source || 'From history report',
+        total: null, services: x.services, notes: `From vehicle history report: ${x.details}`, ocrText: '',
+        imageIds: [], source: 'history', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      });
+    }
+    if (h.inService) await saveSetting(`inService:${d.vehicleId}`, h.inService);
+    const vid = d.vehicleId;
+    draft = null;
+    await loadState();
+    toast(`Imported ${fresh.length} visit${fresh.length === 1 ? '' : 's'}`);
+    go(`#/v/${vid}/history`);
+  };
 }
 
 function pasteText(manual) {

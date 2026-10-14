@@ -10,7 +10,27 @@ const norm = (s) => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
 // OCR often confuses these characters; compare plates loosely.
 const fuzzy = (s) => norm(s).replace(/O/g, '0').replace(/[IL]/g, '1').replace(/S/g, '5').replace(/B/g, '8').replace(/Z/g, '2');
 
+const VIN_RE = /\b[A-HJ-NPR-Z0-9]{17}\b/g;
+
+// Compare VINs loosely: OCR swaps O/0, I/1, S/5, B/8, D/0…
+function vinMatch(a, b) {
+  const fa = fuzzy(a).replace(/D/g, '0');
+  const fb = fuzzy(b).replace(/D/g, '0');
+  if (fa.length !== 17 || fb.length !== 17) return false;
+  let same = 0;
+  for (let i = 0; i < 17; i++) if (fa[i] === fb[i]) same++;
+  return same >= 15;
+}
+
+function vinsIn(text) {
+  return [...new Set((text.toUpperCase().match(/\b[A-Z0-9]{17}\b/g) || []).filter((v) => /\d/.test(v) && /[A-Z]/.test(v)))];
+}
+
 export function detectVehicle(text) {
+  const vins = vinsIn(text);
+  for (const v of VEHICLES) {
+    if (v.vin && vins.some((x) => vinMatch(x, v.vin))) return v.id;
+  }
   const compact = fuzzy(text);
   for (const v of VEHICLES) {
     if (compact.includes(fuzzy(v.plate))) return v.id;
@@ -21,6 +41,18 @@ export function detectVehicle(text) {
   if (/\bleaf\b/.test(lower)) return 'leaf';
   if (/\bkia\b/.test(lower)) return 'carnival';
   return null;
+}
+
+// A document for some other car (a VIN that isn't ours, and no sign of our cars).
+export function detectOtherVehicle(text) {
+  const vins = vinsIn(text).filter((x) => !VEHICLES.some((v) => v.vin && vinMatch(x, v.vin)));
+  if (!vins.length) return null;
+  const year = (text.match(/model year:?\s*((?:19|20)\d{2})/i) || [])[1] || '';
+  const MAKES = { HYUN: 'Hyundai', NISS: 'Nissan', TOYT: 'Toyota', TOYO: 'Toyota', CHEV: 'Chevrolet', HOND: 'Honda', FORD: 'Ford', DODG: 'Dodge', SUBA: 'Subaru', MAZD: 'Mazda', VOLK: 'Volkswagen', JEEP: 'Jeep', TESL: 'Tesla', KIA: 'Kia' };
+  let make = (text.match(/\bmake:\s*([A-Za-z]{3,})/i) || [])[1] || '';
+  make = MAKES[make.toUpperCase()] || make;
+  const model = ((text.match(/\bmodel(?!\s*year):\s*([A-Za-z][A-Za-z0-9 -]{1,20})/i) || [])[1] || '').trim();
+  return { vin: vins[0], description: [year, make, model].filter(Boolean).join(' ').trim() };
 }
 
 function validDate(y, m, d) {
@@ -173,6 +205,9 @@ const SHOP_WORDS = /\b(oil|lube|auto|automotive|tire|tires|motors?|kia|nissan|ga
 const NOT_SHOP = /(technician|customer|checklist|invoice|receipt|repair order|surcharge|\bfilter\b|\bchange\b|cleaner|\bsystem\b|\bfluid\b|\bpoints\b|www\.|http|@)/i;
 
 export function detectShop(text) {
+  // Inspection reports: "Station Name: CARMAX-AUSTIN"
+  const station = text.match(/station name:[ \t]*([A-Za-z][^\n]{2,40})/i);
+  if (station) return titleCase(station[1].replace(/\s*#\s*\d+$/, ''));
   const lines = splitLines(text).slice(0, 60).map((l) => l.replace(/\s*#\s*\d+$/, ''));
   // A short name-like line in capitals that sounds like a shop ("OIL CHANGERS").
   for (const l of lines) {
@@ -337,7 +372,72 @@ export function detectInspection(text) {
   return { recommendations, tread, pads, recalls };
 }
 
+// ---------- Vehicle history reports (AutoCheck / Carfax) ----------
+const HISTORY = /(autocheck|carfax|vehicle history report|detailed vehicle history)/i;
+const HISTORY_MAP = [
+  [/lube|oil (and\/or )?filter|oil change/i, 'oil'],
+  [/tires? or wheels|tire rotat|tires? rotated|wheels? (balanced|aligned)/i, 'tire_rotation'],
+  [/battery/i, 'battery_12v'],
+  [/transmission serviced|transmission (fluid|flush)/i, 'transmission_fluid'],
+  [/fuel system/i, 'fuel_system'],
+  [/brake fluid/i, 'brake_fluid'],
+  [/brakes? (serviced|replaced|pads)/i, 'brakes'],
+  [/coolant|cooling system/i, 'coolant'],
+  [/cabin|air filter/i, 'cabin_filter'],
+  [/spark plug/i, 'spark_plugs'],
+  [/alignment/i, 'alignment'],
+  [/emission inspection|safety inspection/i, 'state_inspection'],
+];
+
+export function detectHistory(text) {
+  if (!HISTORY.test(text)) return null;
+  const lines = splitLines(text);
+  let inService = null;
+  const visits = new Map();
+  let cur = null;
+  let inDetails = false;
+  const toISO = (mdy) => { const [m, d, y] = mdy.split('/').map(Number); const dt = validDate(y, m, d); return dt ? toISODate(dt) : null; };
+  lines.forEach((l, i) => {
+    const ins = l.match(/estimated in service:?\s*(\d{1,2}\/\d{1,2}\/\d{4})?/i);
+    if (ins) { const d = ins[1] || (lines[i + 1] || '').match(/^\d{1,2}\/\d{1,2}\/\d{4}/)?.[0]; if (d) inService = toISO(d); }
+    const ev = l.match(/event date\s*-?\s*(\d{1,2}\/\d{1,2}\/\d{4})/i);
+    if (ev) { cur = { date: toISO(ev[1]), mileage: null, source: '', details: [] }; inDetails = false; if (cur.date) { if (!visits.has(cur.date)) visits.set(cur.date, { date: cur.date, mileage: null, source: '', details: [] }); } return; }
+    if (!cur || !cur.date) return;
+    const v = visits.get(cur.date);
+    const odo = l.match(/^odometer\s*-?\s*([\d,]+)/i);
+    if (odo) { const n = +odo[1].replace(/,/g, ''); if (n > (v.mileage || 0)) v.mileage = n; inDetails = false; return; }
+    const src = l.match(/^data source\s*-?\s*(.+)/i);
+    if (src) { if (!/motor vehicle|service record|dealer listing|manufacturer/i.test(src[1]) && !v.source) v.source = src[1].replace(/\s*\d{3}[.\-]\d{3}[.\-]\d{4}.*/, '').trim(); inDetails = false; return; }
+    if (/^location\b/i.test(l)) { inDetails = false; return; }
+    const det = l.match(/^details\s*-?\s*(.+)/i);
+    if (det) { v.details.push(det[1]); inDetails = true; return; }
+    if (inDetails && /[a-z]/.test(l) && !/^(back to top|owner \d|\d)/i.test(l)) v.details.push(l);
+  });
+  const result = [];
+  for (const v of visits.values()) {
+    const text = v.details.join(' ');
+    const services = [...new Set(HISTORY_MAP.filter(([re]) => re.test(text)).map(([, id]) => id))];
+    if (!services.length) continue;
+    result.push({ ...v, services, details: v.details.join('; ') });
+  }
+  result.sort((a, b) => a.date.localeCompare(b.date));
+  return { inService, visits: result };
+}
+
 export function parseReceipt(text) {
+  const history = detectHistory(text);
+  if (history) {
+    return { vehicleId: detectVehicle(text), date: null, mileage: null, total: null, shop: '', services: [], notes: '', history };
+  }
+  const base = parseReceiptInner(text);
+  if (!base.vehicleId) {
+    const other = detectOtherVehicle(text);
+    if (other) base.otherVehicle = other;
+  }
+  return base;
+}
+
+function parseReceiptInner(text) {
   const inspection = detectInspection(text);
   if (inspection) {
     let shop = detectShop(text);

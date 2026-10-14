@@ -12,6 +12,7 @@ export const VEHICLES = [
     make: 'Kia',
     model: 'Carnival',
     plate: 'XCC 8121',
+    vin: 'KNDNE5H39P6280060',
     powertrain: '3.5L V6 GDI · 8-speed automatic · FWD',
     color: '#0b6e4f',
   },
@@ -21,6 +22,7 @@ export const VEHICLES = [
     make: 'Nissan',
     model: 'Kicks',
     plate: 'WVK 3388',
+    vin: '3N1CP5BV1LL494846',
     powertrain: '1.6L 4-cyl · CVT (Xtronic) · FWD',
     color: '#c2410c',
   },
@@ -117,7 +119,7 @@ export const SERVICES = {
   },
   state_inspection: {
     name: 'State inspection (emissions)',
-    keywords: ['vehicle inspection report', 'state inspection', 'emissions test', 'safety inspection', 'emissions only', 'emissions (i/m)', 'inspection decal'],
+    keywords: ['vehicle inspection report', 'state inspection', 'emissions test', 'safety inspection', 'emissions only', 'emission only', 'emission result', 'emissions (i/m)', 'inspection decal'],
   },
   fuel_system: {
     name: 'Fuel system cleaning',
