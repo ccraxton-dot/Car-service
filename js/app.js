@@ -121,6 +121,7 @@ function shopNotes(vid) {
   const cutoff = new Date();
   cutoff.setMonth(cutoff.getMonth() - 12);
   return vehicleRecords(state.records, vid)
+    .map((r) => ({ ...r, notes: (r.notes || '').split('\n').filter((l) => !/^State inspection: PASS/i.test(l) && !/^From vehicle history report/i.test(l)).join('\n') }))
     .filter((r) => r.notes && !r.inspection && new Date(r.date + 'T12:00:00') >= cutoff)
     .slice(0, 2);
 }
@@ -847,10 +848,22 @@ async function importBackup(file) {
     const data = JSON.parse(await file.text());
     if (data.app !== 'car-service') throw new Error('Not a Car Service backup file');
     for (const img of data.images || []) await db.put('images', { id: img.id, blob: await dataURLToBlob(img.data) });
-    for (const r of data.records || []) await db.put('records', r);
+    // Add records without touching existing ones. Skip a record that duplicates
+    // one already here (same car, date and services) so importing twice is safe.
+    const key = (r) => `${r.vehicleId}|${r.date}|${[...(r.services || [])].sort().join(',')}`;
+    const have = new Set(state.records.map(key));
+    const ids = new Set(state.records.map((r) => r.id));
+    let added = 0;
+    let skipped = 0;
+    for (const r of data.records || []) {
+      if (ids.has(r.id) || have.has(key(r))) { skipped++; continue; }
+      await db.put('records', r);
+      have.add(key(r));
+      added++;
+    }
     for (const [k, v] of Object.entries(data.settings || {})) await db.setSetting(k, v);
     await loadState();
-    toast(`Imported ${data.records?.length || 0} records`);
+    toast(`Imported ${added} new record${added === 1 ? '' : 's'}${skipped ? ` · ${skipped} already in the app` : ''}`);
     render();
   } catch (e) {
     alert('Import failed: ' + e.message);
