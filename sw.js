@@ -1,8 +1,8 @@
 // Offline support: cache the app shell, fall back to network for everything else.
-const CACHE = 'car-service-v1';
+const CACHE = 'car-service-v4';
 const SHELL = [
   './', 'index.html', 'css/styles.css', 'manifest.webmanifest',
-  'js/app.js', 'js/data.js', 'js/db.js', 'js/parse.js', 'js/schedule.js',
+  'js/app.js', 'js/data.js', 'js/db.js', 'js/parse.js', 'js/schedule.js', 'js/essentials.js',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/apple-touch-icon.png',
 ];
 

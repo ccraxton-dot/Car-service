@@ -10,7 +10,27 @@ const norm = (s) => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
 // OCR often confuses these characters; compare plates loosely.
 const fuzzy = (s) => norm(s).replace(/O/g, '0').replace(/[IL]/g, '1').replace(/S/g, '5').replace(/B/g, '8').replace(/Z/g, '2');
 
+const VIN_RE = /\b[A-HJ-NPR-Z0-9]{17}\b/g;
+
+// Compare VINs loosely: OCR swaps O/0, I/1, S/5, B/8, D/0…
+function vinMatch(a, b) {
+  const fa = fuzzy(a).replace(/D/g, '0');
+  const fb = fuzzy(b).replace(/D/g, '0');
+  if (fa.length !== 17 || fb.length !== 17) return false;
+  let same = 0;
+  for (let i = 0; i < 17; i++) if (fa[i] === fb[i]) same++;
+  return same >= 15;
+}
+
+function vinsIn(text) {
+  return [...new Set((text.toUpperCase().match(/\b[A-Z0-9]{17}\b/g) || []).filter((v) => /\d/.test(v) && /[A-Z]/.test(v)))];
+}
+
 export function detectVehicle(text) {
+  const vins = vinsIn(text);
+  for (const v of VEHICLES) {
+    if (v.vin && vins.some((x) => vinMatch(x, v.vin))) return v.id;
+  }
   const compact = fuzzy(text);
   for (const v of VEHICLES) {
     if (compact.includes(fuzzy(v.plate))) return v.id;
@@ -23,6 +43,18 @@ export function detectVehicle(text) {
   return null;
 }
 
+// A document for some other car (a VIN that isn't ours, and no sign of our cars).
+export function detectOtherVehicle(text) {
+  const vins = vinsIn(text).filter((x) => !VEHICLES.some((v) => v.vin && vinMatch(x, v.vin)));
+  if (!vins.length) return null;
+  const year = (text.match(/model year:?\s*((?:19|20)\d{2})/i) || [])[1] || '';
+  const MAKES = { HYUN: 'Hyundai', NISS: 'Nissan', TOYT: 'Toyota', TOYO: 'Toyota', CHEV: 'Chevrolet', HOND: 'Honda', FORD: 'Ford', DODG: 'Dodge', SUBA: 'Subaru', MAZD: 'Mazda', VOLK: 'Volkswagen', JEEP: 'Jeep', TESL: 'Tesla', KIA: 'Kia' };
+  let make = (text.match(/\bmake:\s*([A-Za-z]{3,})/i) || [])[1] || '';
+  make = MAKES[make.toUpperCase()] || make;
+  const model = ((text.match(/\bmodel(?!\s*year):\s*([A-Za-z][A-Za-z0-9 -]{1,20})/i) || [])[1] || '').trim();
+  return { vin: vins[0], description: [year, make, model].filter(Boolean).join(' ').trim() };
+}
+
 function validDate(y, m, d) {
   if (y < 100) y += 2000;
   const dt = new Date(y, m - 1, d);
@@ -32,32 +64,69 @@ function validDate(y, m, d) {
   return dt;
 }
 
-export function detectDate(text) {
-  const candidates = [];
+// Dates on a receipt that are NOT the service date.
+const OTHER_DATE = /(deliv|in[\s-]*serv|warrant|prod(uction)?\b|prod\.? ?date|sold|purchas|expir|\bexp\b|next|due\b|recommend|remind|birth|\bdob\b|valid|since|start|member|reg(istration)?\b|cert)/i;
+// Labels that usually sit next to the service date.
+const SERVICE_DATE = /(date|invoice|\binv\b|\br\.?\s?o\b|repair order|work order|opened|closed|complet|ready|printed|visit|served|time\s*in|in\s*time)/i;
+
+function monthIndex(name) {
+  return MONTHS.indexOf(name.toLowerCase().slice(0, 3)) + 1;
+}
+
+function datesInLine(raw) {
+  // Fix common OCR slips inside numbers: O→0, l/I→1, and spaces around separators.
+  const line = raw
+    .replace(/(?<=\d)[Oo](?=[\d\/\-.])|(?<=[\d\/\-.])[Oo](?=\d)/g, '0')
+    .replace(/(?<=\d)[lI|](?=[\d\/\-.])|(?<=[\d\/\-.])[lI|](?=\d)/g, '1')
+    .replace(/(\d)\s*([\/\-.])\s*(?=\d)/g, '$1$2');
+  const found = [];
   let m;
-  // 10/13/2026, 10-13-26, 10.13.2026
-  const re1 = /\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\b/g;
-  while ((m = re1.exec(text))) {
-    const d = validDate(+m[3], +m[1], +m[2]);
-    if (d) candidates.push(d);
+  // 10/13/2026, 10-13-26, 10.13.2026 (US month first; falls back to day first)
+  const re1 = /(?<![\d\/\-.])(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4}|\d{2})(?![\d\/\-.])/g;
+  while ((m = re1.exec(line))) {
+    const d = validDate(+m[3], +m[1], +m[2]) || validDate(+m[3], +m[2], +m[1]);
+    if (d) found.push(d);
   }
   // 2026-10-13
   const re2 = /\b(20\d{2})[\/\-.](\d{1,2})[\/\-.](\d{1,2})\b/g;
-  while ((m = re2.exec(text))) {
+  while ((m = re2.exec(line))) {
     const d = validDate(+m[1], +m[2], +m[3]);
-    if (d) candidates.push(d);
+    if (d) found.push(d);
   }
-  // Oct 13, 2026
-  const re3 = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})\b/gi;
-  while ((m = re3.exec(text))) {
-    const d = validDate(+m[3], MONTHS.indexOf(m[1].toLowerCase().slice(0, 3)) + 1, +m[2]);
-    if (d) candidates.push(d);
+  // Oct 13, 2026 · October 13 2026 · Oct. 13, 26
+  const re3 = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s*(\d{1,2})(?!\d)(?:st|nd|rd|th)?,?\s*'?(\d{4}|\d{2})\b/gi;
+  while ((m = re3.exec(line))) {
+    const d = validDate(+m[3], monthIndex(m[1]), +m[2]);
+    if (d) found.push(d);
   }
+  // 13 Oct 2026 · 13-OCT-26 · 13OCT26 (dealer systems)
+  const re4 = /\b(\d{1,2})[\s\-]?(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?[\s\-,]?'?(\d{4}|\d{2})\b/gi;
+  while ((m = re4.exec(line))) {
+    const d = validDate(+m[3], monthIndex(m[2]), +m[1]);
+    if (d) found.push(d);
+  }
+  return found;
+}
+
+export function detectDate(text) {
+  const lines = text.split('\n');
+  const candidates = [];
+  lines.forEach((line, i) => {
+    const dates = datesInLine(line);
+    if (!dates.length) return;
+    // A label can sit alone on the line above the date ("Invoice Date" / "10/13/26").
+    const prev = lines[i - 1] || '';
+    const label = datesInLine(prev).length ? '' : prev;
+    const context = line + ' ' + label;
+    if (OTHER_DATE.test(line) || (!SERVICE_DATE.test(line) && OTHER_DATE.test(label))) return;
+    const score = SERVICE_DATE.test(context) ? 2 : 1;
+    for (const d of dates) candidates.push({ d, score });
+  });
   if (!candidates.length) return null;
-  // The service date is usually the earliest date printed (later ones tend
-  // to be "next service due" reminders).
-  candidates.sort((a, b) => a - b);
-  return toISODate(candidates[0]);
+  // Prefer labelled dates; among equals, the most recent one (the visit itself,
+  // not an older date such as when the car was bought).
+  candidates.sort((a, b) => b.score - a.score || b.d - a.d);
+  return toISODate(candidates[0].d);
 }
 
 export function toISODate(d) {
@@ -65,34 +134,65 @@ export function toISODate(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+// Receipts scanned or copied from a photo often come out one cell per line,
+// so labels and values end up far apart. These helpers work line by line.
+const splitLines = (text) => text.split('\n').map((l) => l.trim()).filter(Boolean);
+const VIN = /\b[A-HJ-NPR-Z0-9]{17}\b/;
+
+function mileageValue(str) {
+  const nums = str.match(/\b\d{1,3}(?:,\d{3})+\b|\b\d{3,6}\b/g) || [];
+  for (const n of nums) {
+    const val = +n.replace(/,/g, '');
+    if (val >= 100 && val < 400000 && !(val >= 1990 && val <= 2035 && !n.includes(','))) return val;
+  }
+  return null;
+}
+
 export function detectMileage(text) {
-  const lines = text.split('\n');
-  const labelled = /(mileage|odometer|odo\b|miles\s*in|mi\s*in|in\s*miles|km\s*in|mileage\s*in|current\s*miles)/i;
-  const skip = /(next|due|recommend|return|out\b)/i;
+  const lines = splitLines(text);
+  const labelled = /(mileage|odometer|odo\b|miles\s*in|mi\s*in|in\s*miles|km\s*in|current\s*miles)/i;
+  const skip = /(next|due|recommend|return)/i;
+  // 1. "Mileage In: 41,236" on one line, or the number on the next line.
+  // With "In: 57244 / Out: 57244", only look before "Out".
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!labelled.test(line) || skip.test(line)) continue;
-    const nums = (line + ' ' + (lines[i + 1] || '')).match(/\b\d{1,3}(?:,\d{3})+\b|\b\d{3,6}\b/g);
-    if (nums) {
-      for (const n of nums) {
-        const val = +n.replace(/,/g, '');
-        if (val >= 100 && val < 400000 && !(val >= 1990 && val <= 2035 && !n.includes(','))) return val;
+    if (!labelled.test(lines[i]) || skip.test(lines[i])) continue;
+    const before = lines[i].split(/\bout\b/i)[0];
+    const val = mileageValue(before) ?? (/^[\d,]+$/.test(lines[i + 1] || '') ? mileageValue(lines[i + 1]) : null);
+    if (val) return val;
+  }
+  // 2. A bare number just after the license plate or VIN (vehicle info block).
+  const plates = VEHICLES.map((v) => fuzzy(v.plate));
+  for (let i = 0; i < lines.length; i++) {
+    const isPlate = plates.some((p) => fuzzy(lines[i]) === p || fuzzy(lines[i]).endsWith(p));
+    if (!isPlate && !VIN.test(lines[i])) continue;
+    for (const next of lines.slice(i + 1, i + 4)) {
+      if (/^\d{1,3}(,\d{3})+$|^\d{3,6}$/.test(next)) {
+        const val = mileageValue(next);
+        if (val) return val;
       }
     }
   }
   return null;
 }
 
+const MONEY = /\(?\$?\s?(\d{1,5}(?:,\d{3})*\.\d{2})\)?/g;
+
 export function detectTotal(text) {
-  const lines = text.split('\n');
+  const lines = splitLines(text);
+  const label = /(\btotal\b|amount due|balance due|grand|amount paid|pay this|total due)/i;
+  const notTotal = /sub\s*-?total|\btax\b|labor\s*total|parts\s*total|total\s*(jobs|fees|labor|parts|savings)|savings|discount/i;
   let best = null;
-  for (const line of lines) {
-    if (!/(total|amount due|balance due|grand|amount paid|pay this)/i.test(line)) continue;
-    if (/sub\s*-?total|tax|labor\s*total|parts\s*total/i.test(line)) continue;
-    const amts = line.match(/\$?\s?(\d{1,5}(?:,\d{3})*\.\d{2})/g);
+  for (let i = 0; i < lines.length; i++) {
+    if (!label.test(lines[i]) || notTotal.test(lines[i])) continue;
+    // Amount on the same line, or on the next line when it's in its own cell.
+    let amts = lines[i].match(MONEY);
+    if (!amts && /^\(?\$?\s?[\d,]+\.\d{2}\)?$/.test(lines[i + 1] || '')) amts = lines[i + 1].match(MONEY);
     if (!amts) continue;
-    const v = +amts[amts.length - 1].replace(/[$,\s]/g, '');
-    if (best === null || v > best) best = v;
+    const v = +amts[amts.length - 1].replace(/[$,()\s]/g, '');
+    // "Balance due: $0.00" on a paid invoice isn't the cost of the visit.
+    if (v === 0) continue;
+    // "Amount Due Today" / "Total" usually agree; the last labelled amount wins.
+    best = v;
   }
   if (best !== null) return best;
   // Fall back to the largest dollar amount on the receipt.
@@ -101,9 +201,26 @@ export function detectTotal(text) {
   return Math.max(...all.map((a) => +a.replace(/[$,\s]/g, '')));
 }
 
+const SHOP_WORDS = /\b(oil|lube|auto|automotive|tire|tires|motors?|kia|nissan|garage|repair|car care|service center|valvoline|jiffy|firestone|pep boys|midas|meineke|goodyear|costco|walmart|discount tire|les schwab|mavis|monro|take 5|grease monkey|express)\b/i;
+const NOT_SHOP = /(technician|customer|checklist|invoice|receipt|repair order|surcharge|\bfilter\b|\bchange\b|cleaner|\bsystem\b|\bfluid\b|\bpoints\b|www\.|http|@)/i;
+
 export function detectShop(text) {
-  // First non-trivial line is usually the business name.
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  // Inspection reports: "Station Name: CARMAX-AUSTIN"
+  const station = text.match(/station name:[ \t]*([A-Za-z][^\n]{2,40})/i);
+  if (station) return titleCase(station[1].replace(/\s*#\s*\d+$/, ''));
+  const lines = splitLines(text).slice(0, 60).map((l) => l.replace(/\s*#\s*\d+$/, ''));
+  // A short name-like line in capitals that sounds like a shop ("OIL CHANGERS").
+  for (const l of lines) {
+    const words = l.split(/\s+/);
+    if (words.length > 5 || /\d/.test(l) || NOT_SHOP.test(l)) continue;
+    if (SHOP_WORDS.test(l) && l === l.toUpperCase()) return titleCase(l);
+  }
+  for (const l of lines) {
+    if (l.split(/\s+/).length <= 5 && !/\d/.test(l) && !NOT_SHOP.test(l) && SHOP_WORDS.test(l)) return titleCase(l);
+  }
+  // The shop's website name (www.oilchangers.com).
+  const site = [...text.matchAll(/www\.([a-z0-9-]+)\.(com|net|biz|us)\b/gi)].find((m) => !/twostepsonesticker|txdmv|dps|texas|mykaarma/i.test(m[1]));
+  if (site) return titleCase(site[1].replace(/-/g, ' '));
   for (const l of lines.slice(0, 5)) {
     const letters = l.replace(/[^A-Za-z]/g, '');
     if (letters.length >= 4 && !/invoice|receipt|repair order|date|phone|www\.|http/i.test(l)) {
@@ -113,16 +230,31 @@ export function detectShop(text) {
   return '';
 }
 
+function titleCase(s) {
+  return s.toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase()).trim().slice(0, 60);
+}
+
+// Inspection checklists list items with a status ("Brake Fluid · Checked",
+// "Wiper Blades · OK"). Those were looked at, not replaced.
+const STATUS_ONLY = /^(ok|okay|good|fine|full|filled|checked|inspected|completed?|done|n\/?a|maintenance free|low|topped off|top off|pass(ed)?|fail(ed)?|yes|no|green|yellow|red|clean|dirty|serviceable|needs attention|level)\.?$/i;
+const STATUS_WORD = /\b(ok|checked|inspected|filled|topped|top off|level|good|maintenance free)\b/i;
+const DID_WORK = /(chang|replac|flush|exchang|install|rotat|\bnew\b|r&r|drain|refill|recharge|mount|balanc|align|\$|\d+\.\d{2})/i;
+
 export function detectServices(text) {
   const found = new Set();
-  const lines = text.toLowerCase().split('\n');
-  for (const line of lines) {
+  const lines = splitLines(text);
+  lines.forEach((raw, i) => {
+    const line = raw.toLowerCase();
+    const next = lines[i + 1] || '';
+    const checklistItem = STATUS_ONLY.test(next) || (STATUS_WORD.test(line) && !DID_WORK.test(line));
     for (const [id, svc] of Object.entries(SERVICES)) {
       if (!svc.keywords.length) continue;
       if (svc.exclude && svc.exclude.some((x) => line.includes(x))) continue;
-      if (svc.keywords.some((k) => line.includes(k))) found.add(id);
+      if (!svc.keywords.some((k) => line.includes(k))) continue;
+      if (checklistItem) continue;
+      found.add(id);
     }
-  }
+  });
   // "spark plug" would also match "plugs" in tire-plug repairs; keep it only if explicit.
   if (found.has('spark_plugs') && !/spark/i.test(text)) found.delete('spark_plugs');
   // "blade" alone is weak; require "wiper".
@@ -130,7 +262,219 @@ export function detectServices(text) {
   return [...found];
 }
 
+// Technician comments and recommendations ("oil filter housing cap damaged").
+const CONCERN = /(damag|leak|seep|worn|wear\b|crack|torn|broken|cracked|recommend|\badvis(e|ed)\b|suggest|needs?\b|replace soon|soon\b|low\b|failing|weak|noise|vibrat|corro|rust|loose|missing|bad\b|check\b.*\b(cap|leak|noise|light))/i;
+const BOILERPLATE = /(service advisor|guarantee|privacy|policy|claim|signature|waive|reimburse|approve|warranty|thank|visit|scan|qr code|www\.|http|procedure|terms|disclaimer)/i;
+const CHECKLIST_LABEL = /^(battery|lights|belts|hoses|wipers?|wiper blades|tires?|tire pressures?|brake fluid|washer fluid|coolant reservoir|air filter)$/i;
+
+export function detectNotes(text) {
+  const lines = splitLines(text);
+  const notes = [];
+  for (const l of lines) {
+    if (l.length < 8 || l.length > 140 || BOILERPLATE.test(l) || CHECKLIST_LABEL.test(l)) continue;
+    if (STATUS_ONLY.test(l)) continue;
+    if (CONCERN.test(l) && !notes.includes(l)) notes.push(l);
+  }
+  return notes.join('\n');
+}
+
+// ---------- Multi-point inspection reports ----------
+// Dealer inspections list *recommended* work with estimates. None of it was
+// done, so it must never be recorded as a service. Instead we pull out the
+// recommendations (with severity), tire tread and brake pad measurements,
+// and any recalls/campaigns performed.
+
+const INSPECTION = /(multi[\s-]?point|inspection results|vehicle health|needs immediate attention|needs attention soon|passed inspection)/i;
+
+const NOISE_LINE = /^(print|a|atte|notes?|-notes|https?:\/\/\S+|\d+\/\d+|repair estimate:?|\$[\d,.]+)$/i;
+
+function serviceFor(line) {
+  const l = line.toLowerCase();
+  for (const [id, svc] of Object.entries(SERVICES)) {
+    if (!svc.keywords.length || id === 'inspection') continue;
+    if (svc.exclude && svc.exclude.some((x) => l.includes(x))) continue;
+    if (svc.keywords.some((k) => l.includes(k))) return id;
+  }
+  if (/\bcoolant|antifreeze/.test(l)) return 'coolant';
+  if (/engine oil/.test(l)) return 'oil';
+  if (/transmission|\batf\b|cvt/.test(l)) return 'transmission_fluid';
+  if (/\bbrake/.test(l)) return 'brakes';
+  return null;
+}
+
+export function detectInspection(text) {
+  if (!INSPECTION.test(text)) return null;
+  const lines = splitLines(text);
+  const recommendations = [];
+  let severity = null;
+  let lastEstimateIdx = -1;
+
+  lines.forEach((line, i) => {
+    if (/needs immediate attention|immediate attention|\bred\b.*items?/i.test(line)) severity = 'urgent';
+    else if (/needs attention soon|attention soon|future attention|\byellow\b.*items?/i.test(line)) severity = 'soon';
+    else if (/passed inspection|checked and ok|\bgreen\b.*items?/i.test(line)) severity = null;
+    if (!/repair estimate|estimate:/i.test(line) || !severity) return;
+    const amountLine = /\$[\d,]+\.\d{2}/.test(line) ? line : lines[i + 1] || '';
+    const m = amountLine.match(/\$([\d,]+\.\d{2})/);
+    const estimate = m ? +m[1].replace(/,/g, '') : null;
+    // Look back for the item's title (skipping noise), then forward through
+    // its description, until we hit the previous/next estimate.
+    let service = null;
+    let label = '';
+    const isTitle = (l) => !NOISE_LINE.test(l) && l.split(/\s+/).length <= 8
+      && !/needs (immediate )?attention|condition and interval|interior|exterior|under hood|under vehicle/i.test(l);
+    const back = [];
+    for (let j = i - 1; j > lastEstimateIdx && j >= i - 6; j--) if (isTitle(lines[j])) back.push(lines[j]);
+    // 1. The nearest title-like line above the estimate.
+    if (back.length) { label = back[0]; service = serviceFor(back[0]); }
+    // 2. Other short lines above it ("CUSTOMER REQUESTS ENGINE AIR FILTER").
+    for (const l of back.slice(1)) { if (service) break; const svc = serviceFor(l); if (svc) { service = svc; label = l; } }
+    // 3. The description after the estimate ("THE FUEL SYSTEM IS…").
+    for (let j = i + 2; !service && j < Math.min(lines.length, i + 6); j++) {
+      if (/repair estimate/i.test(lines[j])) break;
+      service = serviceFor(lines[j]);
+    }
+    lastEstimateIdx = i + 1;
+    if (!service && !label) return;
+    if (service && recommendations.some((r) => r.service === service)) return;
+    recommendations.push({
+      service: service || 'other',
+      label: label.replace(/^[!\d\s]+/, '').trim(),
+      estimate,
+      severity,
+    });
+  });
+
+  // Tire tread: "Left Front Tire - 5/32"", "LF 5/32"
+  const tread = {};
+  const treadRe = /\b(left|right|l|r)\s*(front|rear|f|r)\b[^\n\d]{0,12}?(\d{1,2})\s*\/\s*32/gi;
+  let m;
+  while ((m = treadRe.exec(text))) {
+    const key = (m[1][0] + m[2][0]).toUpperCase();
+    tread[key] = +m[3];
+  }
+  // Brake pads: "Left Front Brake - 7mm or Greater"
+  const pads = {};
+  const padRe = /\b(left|right)\s*(front|rear)\s*(brake|pad)[^\n\d]{0,10}?(\d{1,2}(?:\.\d)?)\s*mm(\s*or\s*greater|\+)?/gi;
+  while ((m = padRe.exec(text))) {
+    const key = (m[1][0] + m[2][0]).toUpperCase();
+    pads[key] = { mm: +m[4], orMore: !!m[5] };
+  }
+  // Recalls and campaigns (free warranty work done on the visit).
+  const recalls = [];
+  for (const l of lines) {
+    const code = l.match(/\b(SC\d{3}|P\d{5}|\d{2}V\d{3}|R\d{4}|[A-Z]{2}\d{3})\b/);
+    if (code && /recall|campaign|imprvmt|improvement|install/i.test(l) && !recalls.some((r) => r.startsWith(code[1]))) {
+      recalls.push(l.replace(/\s+/g, ' ').slice(0, 90));
+    }
+  }
+
+  return { recommendations, tread, pads, recalls };
+}
+
+// ---------- Vehicle history reports (AutoCheck / Carfax) ----------
+const HISTORY = /(autocheck|carfax|vehicle history report|detailed vehicle history)/i;
+const HISTORY_MAP = [
+  [/lube|oil (and\/or )?filter|oil change/i, 'oil'],
+  [/tires? or wheels|tire rotat|tires? rotated|wheels? (balanced|aligned)/i, 'tire_rotation'],
+  [/battery/i, 'battery_12v'],
+  [/transmission serviced|transmission (fluid|flush)/i, 'transmission_fluid'],
+  [/fuel system/i, 'fuel_system'],
+  [/brake fluid/i, 'brake_fluid'],
+  [/brakes? (serviced|replaced|pads)/i, 'brakes'],
+  [/coolant|cooling system/i, 'coolant'],
+  [/cabin|air filter/i, 'cabin_filter'],
+  [/spark plug/i, 'spark_plugs'],
+  [/alignment/i, 'alignment'],
+  [/emission inspection|safety inspection/i, 'state_inspection'],
+];
+
+export function detectHistory(text) {
+  if (!HISTORY.test(text)) return null;
+  const lines = splitLines(text);
+  let inService = null;
+  const visits = new Map();
+  let cur = null;
+  let inDetails = false;
+  const toISO = (mdy) => { const [m, d, y] = mdy.split('/').map(Number); const dt = validDate(y, m, d); return dt ? toISODate(dt) : null; };
+  lines.forEach((l, i) => {
+    const ins = l.match(/estimated in service:?\s*(\d{1,2}\/\d{1,2}\/\d{4})?/i);
+    if (ins) { const d = ins[1] || (lines[i + 1] || '').match(/^\d{1,2}\/\d{1,2}\/\d{4}/)?.[0]; if (d) inService = toISO(d); }
+    const ev = l.match(/event date\s*-?\s*(\d{1,2}\/\d{1,2}\/\d{4})/i);
+    if (ev) { cur = { date: toISO(ev[1]), mileage: null, source: '', details: [] }; inDetails = false; if (cur.date) { if (!visits.has(cur.date)) visits.set(cur.date, { date: cur.date, mileage: null, source: '', details: [] }); } return; }
+    if (!cur || !cur.date) return;
+    const v = visits.get(cur.date);
+    const odo = l.match(/^odometer\s*-?\s*([\d,]+)/i);
+    if (odo) { const n = +odo[1].replace(/,/g, ''); if (n > (v.mileage || 0)) v.mileage = n; inDetails = false; return; }
+    const src = l.match(/^data source\s*-?\s*(.+)/i);
+    if (src) { if (!/motor vehicle|service record|dealer listing|manufacturer/i.test(src[1]) && !v.source) v.source = src[1].replace(/\s*\d{3}[.\-]\d{3}[.\-]\d{4}.*/, '').trim(); inDetails = false; return; }
+    if (/^location\b/i.test(l)) { inDetails = false; return; }
+    const det = l.match(/^details\s*-?\s*(.+)/i);
+    if (det) { v.details.push(det[1]); inDetails = true; return; }
+    if (inDetails && /[a-z]/.test(l) && !/^(back to top|owner \d|\d)/i.test(l)) v.details.push(l);
+  });
+  const result = [];
+  for (const v of visits.values()) {
+    const text = v.details.join(' ');
+    const services = [...new Set(HISTORY_MAP.filter(([re]) => re.test(text)).map(([, id]) => id))];
+    if (!services.length) continue;
+    result.push({ ...v, services, details: v.details.join('; ') });
+  }
+  result.sort((a, b) => a.date.localeCompare(b.date));
+  return { inService, visits: result };
+}
+
 export function parseReceipt(text) {
+  const history = detectHistory(text);
+  if (history) {
+    return { vehicleId: detectVehicle(text), date: null, mileage: null, total: null, shop: '', services: [], notes: '', history };
+  }
+  const base = parseReceiptInner(text);
+  if (!base.vehicleId) {
+    const other = detectOtherVehicle(text);
+    if (other) base.otherVehicle = other;
+  }
+  return base;
+}
+
+function parseReceiptInner(text) {
+  const inspection = detectInspection(text);
+  if (inspection) {
+    let shop = detectShop(text);
+    if (/^(kia|nissan)$/i.test(shop)) shop = `${titleCase(shop)} dealer`;
+    const urgent = inspection.recommendations.filter((r) => r.severity === 'urgent').length;
+    const soon = inspection.recommendations.length - urgent;
+    const quoted = inspection.recommendations.reduce((s, r) => s + (r.estimate || 0), 0);
+    const notes = [
+      `Inspection: ${urgent} marked urgent, ${soon} marked soon${quoted ? `, $${quoted.toFixed(2)} quoted (not done)` : ''}.`,
+      ...inspection.recalls.map((r) => `Recall/campaign: ${r}`),
+    ].join('\n');
+    return {
+      vehicleId: detectVehicle(text),
+      date: detectDate(text),
+      mileage: detectMileage(text),
+      total: null, // an estimate, not money spent
+      shop,
+      services: ['inspection'],
+      notes,
+      inspection,
+    };
+  }
+  return parseReceiptBody(text);
+}
+
+// State inspection result ("Overall Result: PASS", "Fault Codes: No Codes Present").
+function stateInspectionNotes(text) {
+  if (!/vehicle inspection report|emissions test|overall result/i.test(text)) return '';
+  const result = text.match(/overall result:?\s*(pass|fail)/i);
+  const codes = text.match(/fault codes:?\s*([^\n]+)/i);
+  const parts = [];
+  if (result) parts.push(`State inspection: ${result[1].toUpperCase()}`);
+  if (codes) parts.push(/no codes/i.test(codes[1]) ? 'no fault codes' : `fault codes: ${codes[1].trim()}`);
+  return parts.length ? parts.join(', ') + '.' : '';
+}
+
+function parseReceiptBody(text) {
   return {
     vehicleId: detectVehicle(text),
     date: detectDate(text),
@@ -138,5 +482,6 @@ export function parseReceipt(text) {
     total: detectTotal(text),
     shop: detectShop(text),
     services: detectServices(text),
+    notes: [stateInspectionNotes(text), detectNotes(text)].filter(Boolean).join('\n'),
   };
 }

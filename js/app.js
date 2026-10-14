@@ -1,7 +1,8 @@
 import { VEHICLES, SERVICES, SCHEDULES, TIPS, GENERAL_TIPS } from './data.js';
 import * as db from './db.js';
 import { parseReceipt, toISODate } from './parse.js';
-import { odometer, dueItems, vehicleRecords, defaultInService, scheduleFor } from './schedule.js';
+import { odometer, dueItems, vehicleRecords, defaultInService, scheduleFor, planVisits } from './schedule.js';
+import { SAVE_MONEY_TIPS } from './essentials.js';
 
 const app = document.getElementById('app');
 const state = { records: [], settings: {} };
@@ -40,10 +41,222 @@ async function saveSetting(key, value) {
   await db.setSetting(key, value);
 }
 
+// 'essential' = only what matters (default), 'full' = manufacturer schedule.
+const mode = () => setting('mode', 'essential');
+
 function vehicleStatus(vid) {
   const odo = odometer(state.records, vid, setting(`odo:${vid}`));
-  const items = dueItems(vid, state.records, odo, setting(`intervals:${vid}`, {}), setting(`inService:${vid}`, defaultInService(vid)));
+  const items = dueItems(vid, state.records, odo, setting(`intervals:${vid}`, {}), setting(`inService:${vid}`, defaultInService(vid)), mode());
   return { odo, items };
+}
+
+function modeToggle() {
+  const m = mode();
+  return `<div class="mode">
+    <div class="tabs mode-tabs" role="group" aria-label="Schedule mode">
+      <button data-mode="essential" class="${m === 'essential' ? 'active' : ''}">Essentials only</button>
+      <button data-mode="full" class="${m === 'full' ? 'active' : ''}">Full schedule</button>
+    </div>
+    <p class="muted small mode-help">${m === 'essential'
+      ? 'Showing only what prevents expensive damage or safety problems, with intervals stretched where it\'s safe. Everything else is listed as "can wait" with the warning signs to watch for.'
+      : 'Showing the full manufacturer-style schedule. Switch to Essentials only to cut shop visits to what matters.'}</p>
+  </div>`;
+}
+
+function bindModeToggle() {
+  app.querySelectorAll('[data-mode]').forEach((b) => {
+    b.onclick = async () => { await saveSetting('mode', b.dataset.mode); render(); };
+  });
+}
+
+const TIER_TAG = { essential: '', diy: '<span class="tag diy">DIY</span>', wait: '<span class="tag wait">can wait</span>' };
+const LEVEL_LABEL = { easy: 'Easy DIY', moderate: 'Doable DIY', shop: 'Shop job' };
+
+function diyBlock(it) {
+  const d = it.diy;
+  if (!d) return '';
+  const title = d.level === 'shop' ? 'Save money' : `${LEVEL_LABEL[d.level]} · ${esc(d.time)}`;
+  const cost = d.level === 'shop' ? esc(d.shop) : `Parts ${esc(d.part)} vs shop ${esc(d.shop)}`;
+  return `<details class="diy-box"><summary>🛠 ${title} <span class="muted">· ${cost}</span></summary><p>${esc(d.how)}</p></details>`;
+}
+
+function itemCard(it) {
+  const m = mode();
+  const intervalTxt = [it.miles ? it.miles.toLocaleString() + ' mi' : '', it.months ? it.months + ' mo' : ''].filter(Boolean).join(' / ') || '—';
+  const firstTxt = it.firstMiles || it.firstMonths ? ` (first at ${[it.firstMiles ? it.firstMiles.toLocaleString() + ' mi' : '', it.firstMonths ? it.firstMonths / 12 + ' yr' : ''].filter(Boolean).join(' / ')})` : '';
+  const lastTxt = it.last ? `Last done ${fmtDate(it.last.date)}${it.last.mileage ? ' @ ' + fmtMiles(it.last.mileage) : ''}` : 'No record yet';
+  if (it.status === 'wait') {
+    return `<div class="card item status-wait">
+      <div class="item-head"><span class="item-name">${esc(it.name)}</span><button class="link" data-edit="${it.service}">Log / edit</button></div>
+      <div class="wait-box">${esc(it.wait)}</div>
+      <div class="muted small">${lastTxt}</div>
+      ${diyBlock(it)}
+    </div>`;
+  }
+  return `<div class="card item status-${it.status}">
+    <div class="item-head">
+      <span class="item-name">${esc(it.name)}${it.action === 'inspect' ? ' <span class="tag">inspect</span>' : ''}${TIER_TAG[it.tier] || ''}${it.customized ? ' <span class="tag">custom</span>' : ''}</span>
+      <span class="pill ${it.status}">${STATUS_LABEL[it.status]}</span>
+    </div>
+    <div class="small">${esc(dueText(it))}${it.status !== 'norecord' && leftText(it) ? ` · <b>${esc(leftText(it))}</b>` : ''}</div>
+    <div class="muted small">Every ${intervalTxt}${firstTxt}${it.stretched && m === 'essential' && !it.customized ? ' (essentials interval)' : ''} · ${lastTxt}</div>
+    ${it.status === 'norecord' ? '<div class="small warn">No record on file. If it has never been done (or you don\'t know when), it\'s probably due. Add a receipt or log it to start tracking.</div>' : ''}
+    ${m === 'essential' && it.wait ? `<div class="note"><b>Why it matters / can it wait?</b> ${esc(it.wait)}</div>` : ''}
+    ${m === 'full' && it.note ? `<div class="note">${esc(it.note)}</div>` : ''}
+    ${m === 'full' && it.tier === 'wait' && it.wait ? `<div class="note"><b>Can it wait?</b> ${esc(it.wait)}</div>` : ''}
+    ${diyBlock(it)}
+    <div class="item-actions"><button class="link" data-edit="${it.service}">Change interval / log as done</button></div>
+  </div>`;
+}
+
+function whenText(d, overdue) {
+  if (overdue) return 'now (something is overdue)';
+  const days = Math.round((d - new Date()) / 86400000);
+  if (days <= 31) return `within ${Math.max(days, 1)} days (by ${fmtDate(d)})`;
+  return `around ${d.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}`;
+}
+
+// Notes and recommendations from recent receipts (e.g. "housing cap damaged").
+function shopNotes(vid) {
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - 12);
+  return vehicleRecords(state.records, vid)
+    .map((r) => ({ ...r, notes: (r.notes || '').split('\n').filter((l) => !/^State inspection: PASS/i.test(l) && !/^From vehicle history report/i.test(l)).join('\n') }))
+    .filter((r) => r.notes && !r.inspection && new Date(r.date + 'T12:00:00') >= cutoff)
+    .slice(0, 2);
+}
+
+function notesCard(vid) {
+  const recs = shopNotes(vid);
+  if (!recs.length) return '';
+  return `<div class="card shop-notes">
+    <h3>⚠︎ Notes from the shop</h3>
+    ${recs.map((r) => `<a href="#/r/${r.id}" class="shop-note"><span class="muted small">${fmtDate(r.date)}${r.shop ? ' · ' + esc(r.shop) : ''}</span><span class="pre">${esc(r.notes)}</span></a>`).join('')}
+  </div>`;
+}
+
+// ---------- dealer inspections ----------
+const SEV_LABEL = { urgent: 'Dealer: urgent', soon: 'Dealer: soon' };
+const POS = { LF: 'Left front', RF: 'Right front', LR: 'Left rear', RR: 'Right rear' };
+
+function inspectionSummary(insp) {
+  const recs = insp.recommendations || [];
+  const t = insp.tread || {};
+  const pd = insp.pads || {};
+  return `<div class="card insp-summary">
+    <h3>Inspection findings</h3>
+    ${recs.length ? `<p class="small muted">Recommended, not done:</p><ul class="plan-list">${recs.map((r) => `<li><span class="sev ${r.severity}"></span>${esc(SERVICES[r.service]?.name || r.label)}${r.estimate ? ` <span class="muted small">· ${fmtMoney(r.estimate)}</span>` : ''}</li>`).join('')}</ul>` : ''}
+    ${Object.keys(t).length ? `<p class="small"><b>Tire tread:</b> ${Object.entries(t).map(([k, v]) => `${k} ${v}/32″`).join(' · ')}</p>` : ''}
+    ${Object.keys(pd).length ? `<p class="small"><b>Brake pads:</b> ${Object.entries(pd).map(([k, v]) => `${k} ${v.mm}${v.orMore ? '+' : ''} mm`).join(' · ')}</p>` : ''}
+  </div>`;
+}
+
+function latestInspection(vid) {
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - 12);
+  return vehicleRecords(state.records, vid).find((r) => r.inspection && new Date(r.date + 'T12:00:00') >= cutoff) || null;
+}
+
+// My take on one dealer recommendation, using this car's own records and schedule.
+function verdict(vid, insp, rec, items) {
+  const est = rec.estimate ? fmtMoney(rec.estimate) : 'the quote';
+  const later = vehicleRecords(state.records, vid)
+    .filter((r) => r.id !== insp.id && r.date >= insp.date && (r.services || []).includes(rec.service))
+    .pop();
+  if (later) {
+    const price = later.total && later.services.length === 1 ? ` for ${fmtMoney(later.total)}` : '';
+    const saved = later.total && later.services.length === 1 && rec.estimate > later.total ? ` (saved ${fmtMoney(rec.estimate - later.total)})` : '';
+    return { kind: 'done', text: `Done ${fmtDate(later.date)}${later.shop ? ' at ' + esc(later.shop) : ''}${price}${saved}.` };
+  }
+  if (rec.service === 'fuel_system') return { kind: 'skip', text: `Usually an upsell. It isn't in the manufacturer's schedule. Decline it, and use Top Tier gas instead.` };
+  if (rec.service === 'alignment') return { kind: 'maybe', text: `Only needed if the car pulls, the steering wheel sits off-center, or a tire wears on one edge. Ask them to show you the uneven wear. Otherwise skip it.` };
+  if (rec.service === 'tire_rotation') return { kind: 'diy', text: `Worth doing, but it's free for life where you buy tires (Discount Tire, Costco), or $25 with an oil change. No need to pay ${est}.` };
+  const it = items.find((i) => i.service === rec.service);
+  if (!it) return { kind: 'maybe', text: 'Ask what happens if you wait. If the answer isn\'t about safety or damage, it can wait.' };
+  // Was it actually due at the time of the inspection?
+  const notDue = it.status === 'ok' || (it.status === 'wait' && it.tier === 'wait');
+  if (it.tier === 'diy' && it.diy) return { kind: 'diy', text: `Do it yourself: ${esc(it.diy.time)}, parts ${esc(it.diy.part)} instead of ${est}.` };
+  if (it.status === 'wait') return { kind: 'skip', text: `Can wait. ${esc(it.wait || '')}` };
+  if (notDue) return { kind: 'skip', text: `Not due by your schedule. ${esc(dueText(it))}.` };
+  const cheaper = it.diy && it.diy.shop ? ` An independent shop usually charges ${esc(it.diy.shop)}.` : '';
+  return { kind: 'due', text: `Reasonable: it's due by your schedule.${cheaper}` };
+}
+
+const VERDICT_LABEL = { done: 'Done', skip: 'Skip / wait', diy: 'DIY / cheaper', maybe: 'Only if…', due: 'Do it' };
+
+function inspectionCard(vid, items) {
+  const insp = latestInspection(vid);
+  if (!insp || !insp.inspection.recommendations.length) return '';
+  const recs = insp.inspection.recommendations;
+  const quoted = recs.reduce((s, r) => s + (r.estimate || 0), 0);
+  const rows = recs.map((r) => ({ r, v: verdict(vid, insp, r, items) }));
+  const needed = rows.filter((x) => x.v.kind === 'due').reduce((s, x) => s + (x.r.estimate || 0), 0);
+  return `<div class="card insp">
+    <h3>🔍 Dealer inspection, ${fmtDate(insp.date)}</h3>
+    <p class="small muted">They recommended ${recs.length} items (${fmtMoney(quoted)}). Here's what actually matters, based on your records and the ${mode() === 'essential' ? 'Essentials' : 'full'} schedule${needed ? `. Worth doing now: about ${fmtMoney(needed)}` : ''}.</p>
+    ${rows.map(({ r, v }) => `<div class="insp-row">
+      <div class="insp-head"><span><span class="sev ${r.severity}" title="${SEV_LABEL[r.severity]}"></span><b>${esc(SERVICES[r.service]?.name || r.label)}</b>${r.estimate ? ` <span class="muted small">· quoted ${fmtMoney(r.estimate)}</span>` : ''}</span><span class="verdict ${v.kind}">${VERDICT_LABEL[v.kind]}</span></div>
+      <div class="small">${v.text}</div>
+    </div>`).join('')}
+    <a class="link small" href="#/r/${insp.id}">View full inspection</a>
+  </div>`;
+}
+
+// Tire tread and brake pad measurements from the latest inspection.
+const TREAD_REPLACE = 4; // 32nds — recommended for wet grip (2/32 is the legal minimum)
+const MILES_PER_32ND = 5000; // rough rule of thumb when we only have one measurement
+
+function wearCard(vid, odo) {
+  const recs = vehicleRecords(state.records, vid).filter((r) => r.inspection && (Object.keys(r.inspection.tread || {}).length || Object.keys(r.inspection.pads || {}).length));
+  if (!recs.length) return '';
+  const latest = recs[0];
+  const t = latest.inspection.tread || {};
+  const pd = latest.inspection.pads || {};
+  let tireText = '';
+  if (Object.keys(t).length) {
+    const min = Math.min(...Object.values(t));
+    const max = Math.max(...Object.values(t));
+    // Wear rate: from two inspections if we have them, else a rule of thumb.
+    const prev = recs.slice(1).find((r) => Object.keys(r.inspection.tread || {}).length && r.mileage);
+    let perMile = 1 / MILES_PER_32ND;
+    let rough = true;
+    if (prev && latest.mileage > prev.mileage) {
+      const prevMin = Math.min(...Object.values(prev.inspection.tread));
+      if (prevMin > min) { perMile = (prevMin - min) / (latest.mileage - prev.mileage); rough = false; }
+    }
+    const milesSince = odo.miles && latest.mileage ? Math.max(0, odo.miles - latest.mileage) : 0;
+    const nowMin = min - milesSince * perMile;
+    const milesLeft = Math.max(0, (nowMin - TREAD_REPLACE) / perMile);
+    const monthsLeft = odo.perYear ? Math.round((milesLeft / odo.perYear) * 12) : null;
+    const state = nowMin <= 3 ? 'urgent' : nowMin <= 5 ? 'soon' : 'ok';
+    tireText = `<div class="wear-row"><span class="sev ${state === 'ok' ? 'good' : state}"></span><div>
+      <b>Tires:</b> ${Object.entries(t).map(([k, v]) => `${k} ${v}/32″`).join(' · ')} <span class="muted small">(${fmtDate(latest.date)})</span><br>
+      <span class="small">${milesLeft <= 0 ? 'Plan new tires now. Below 4/32″, wet-road grip drops a lot.' : `Plan new tires in roughly <b>${monthsLeft != null ? monthsLeft + ' months' : ''}</b> (~${Math.round(milesLeft / 500) * 500 > 0 ? (Math.round(milesLeft / 500) * 500).toLocaleString() : '<500'} mi)${rough ? ', a rough estimate' : ''}. Replace at 4/32″; 2/32″ is the legal minimum.`}
+      ${max - min >= 2 ? ' One end is wearing faster, so get the tires rotated now (free where you buy tires) to even them out.' : ''} Price tires at Costco or Discount Tire, not the dealer.</span>
+    </div></div>`;
+  }
+  let padText = '';
+  if (Object.keys(pd).length) {
+    const min = Math.min(...Object.values(pd).map((v) => v.mm));
+    const state = min <= 3 ? 'urgent' : min <= 4 ? 'soon' : 'good';
+    padText = `<div class="wear-row"><span class="sev ${state}"></span><div>
+      <b>Brake pads:</b> ${Object.entries(pd).map(([k, v]) => `${k} ${v.mm}${v.orMore ? '+' : ''} mm`).join(' · ')}<br>
+      <span class="small">${min <= 3 ? 'Replace soon (3 mm or less).' : min <= 4 ? 'Getting low. Plan pads at your next visit.' : 'Plenty of life left. Replace at 3 mm, or when they squeal.'}</span>
+    </div></div>`;
+  }
+  return `<div class="card wear"><h3>📏 Wear check</h3>${tireText}${padText}</div>`;
+}
+
+function planCard(items) {
+  const { visit, diy } = planVisits(items, mode());
+  if (!visit && !diy.length) return '';
+  return `<div class="card plan">
+    ${visit ? `<h3>🔧 Next shop visit: ${esc(whenText(visit.date, visit.overdue))}</h3>
+      <p class="small muted">Get all of these done in the same trip:</p>
+      <ul class="plan-list">${visit.items.map((i) => `<li>${esc(i.name)} <span class="muted small">· ${i.status === 'norecord' ? 'no record' : esc(leftText(i) || dueText(i))}</span></li>`).join('')}</ul>` : ''}
+    ${visit && visit.items.some((i) => i.status === 'norecord') ? '<p class="small muted">Already had some of these done? Tap <b>Change interval / log as done</b> on that item (or add the receipt) and it will drop off this list.</p>' : ''}
+    ${diy.length ? `<h3>🛠 Do yourself</h3><ul class="plan-list">${diy.map((i) => `<li>${esc(i.name)} <span class="muted small">· ${i.diy ? esc(i.diy.time) + ', saves ~' + esc(i.diy.shop) : ''}</span></li>`).join('')}</ul>` : ''}
+  </div>`;
 }
 
 function dueText(it) {
@@ -66,7 +279,7 @@ function leftText(it) {
   return parts.join(' · ');
 }
 
-const STATUS_LABEL = { overdue: 'Overdue', soon: 'Due soon', ok: 'OK', norecord: 'No record' };
+const STATUS_LABEL = { overdue: 'Overdue', soon: 'Due soon', ok: 'OK', norecord: 'No record', wait: 'Can wait' };
 
 // ---------- views ----------
 function header(title, back) {
@@ -83,7 +296,7 @@ function viewHome() {
     const overdue = items.filter((i) => i.status === 'overdue').length;
     const soon = items.filter((i) => i.status === 'soon').length;
     const norec = items.filter((i) => i.status === 'norecord').length;
-    const next = items.find((i) => i.status !== 'norecord');
+    const next = items.find((i) => i.status !== 'norecord' && i.status !== 'wait');
     const recs = vehicleRecords(state.records, v.id);
     return `<a class="card vehicle" href="#/v/${v.id}" style="--accent:${v.color}">
       <div class="vehicle-top">
@@ -99,6 +312,7 @@ function viewHome() {
         ${!overdue && !soon && recs.length ? '<span class="pill ok">All caught up</span>' : ''}
         ${norec ? `<span class="pill norecord">${norec} without records</span>` : ''}
       </div>
+      ${shopNotes(v.id).length ? `<div class="next warn">⚠︎ Shop note: ${esc(shopNotes(v.id)[0].notes.split('\n').pop())}</div>` : ''}
       ${next ? `<div class="next">Next: <b>${esc(next.name)}</b> · ${esc(leftText(next) || dueText(next))}</div>` : ''}
       <div class="muted small">${recs.length} service record${recs.length === 1 ? '' : 's'}${recs[0] ? ` · last ${fmtDate(recs[0].date)}` : ''}</div>
     </a>`;
@@ -108,11 +322,13 @@ function viewHome() {
 
   app.innerHTML = `${header('Car Service')}
   <main>
+    ${modeToggle()}
     ${cards}
     <h2>Recent services</h2>
     ${recent.length ? recent.map(recordRow).join('') : '<p class="empty">No receipts yet. Tap <b>＋ Receipt</b> to snap your first one.</p>'}
   </main>
   <a class="fab" href="#/add">＋ Receipt</a>`;
+  bindModeToggle();
 }
 
 function recordRow(r) {
@@ -136,18 +352,10 @@ function viewVehicle(vid, tab = 'due') {
 
   let body = '';
   if (tab === 'due') {
-    body = items.map((it) => `
-      <button class="card item status-${it.status}" data-edit="${it.service}">
-        <div class="item-head">
-          <span class="item-name">${esc(it.name)}${it.action === 'inspect' ? ' <span class="tag">inspect</span>' : ''}${it.customized ? ' <span class="tag">custom</span>' : ''}</span>
-          <span class="pill ${it.status}">${STATUS_LABEL[it.status]}</span>
-        </div>
-        <div class="small">${esc(dueText(it))}${it.status !== 'norecord' && leftText(it) ? ` · <b>${esc(leftText(it))}</b>` : ''}</div>
-        <div class="muted small">Every ${[it.miles ? it.miles.toLocaleString() + ' mi' : '', it.months ? it.months + ' mo' : ''].filter(Boolean).join(' / ') || '—'}${it.firstMiles || it.firstMonths ? ` (first at ${[it.firstMiles ? it.firstMiles.toLocaleString() + ' mi' : '', it.firstMonths ? it.firstMonths / 12 + ' yr' : ''].filter(Boolean).join(' / ')})` : ''}
-          · ${it.last ? `Last done ${fmtDate(it.last.date)}${it.last.mileage ? ' @ ' + fmtMiles(it.last.mileage) : ''}` : 'No record yet'}</div>
-        ${it.status === 'norecord' ? '<div class="small warn">No record on file. If it has never been done (or you don\'t know when), it is probably due. Add a receipt or log it to start tracking.</div>' : ''}
-        ${it.note ? `<div class="note">${esc(it.note)}</div>` : ''}
-      </button>`).join('');
+    const tracked = items.filter((i) => i.status !== 'wait');
+    const waiting = items.filter((i) => i.status === 'wait');
+    body = modeToggle() + inspectionCard(vid, items) + wearCard(vid, odo) + notesCard(vid) + planCard(items) + tracked.map(itemCard).join('')
+      + (waiting.length ? `<h2>Can wait: go when you notice these signs</h2>${waiting.map(itemCard).join('')}` : '');
   } else if (tab === 'history') {
     body = `<div class="stats">
         <div><b>${recs.length}</b><span>visits</span></div>
@@ -157,7 +365,8 @@ function viewVehicle(vid, tab = 'due') {
       ${recs.length ? recs.map(recordRow).join('') : '<p class="empty">No service records for this vehicle yet.</p>'}`;
   } else {
     body = (TIPS[vid] || []).map((t) => `<div class="card tip"><h3>${esc(t.title)}</h3><p>${esc(t.body)}</p></div>`).join('')
-      + `<h2>Good habits for every car</h2><ul class="tips">${GENERAL_TIPS.map((t) => `<li>${esc(t)}</li>`).join('')}</ul>
+      + `<h2>Spend less, visit the shop less</h2><ul class="tips">${SAVE_MONEY_TIPS.map((t) => `<li>${esc(t)}</li>`).join('')}</ul>
+      <h2>Good habits for every car</h2><ul class="tips">${GENERAL_TIPS.map((t) => `<li>${esc(t)}</li>`).join('')}</ul>
       <p class="muted small">Intervals are typical normal-driving recommendations from manufacturer schedules and common practice. Your owner's manual (or the Kia/Nissan owner portal for your VIN) is the final word. Tap any item on the Schedule tab to change its interval.</p>`;
   }
 
@@ -182,6 +391,7 @@ function viewVehicle(vid, tab = 'due') {
 
   document.getElementById('odoBtn').onclick = () => editOdometer(vid, odo);
   app.querySelectorAll('[data-edit]').forEach((b) => { b.onclick = () => editInterval(vid, b.dataset.edit); });
+  bindModeToggle();
 }
 
 function sheet(html, onMount) {
@@ -213,10 +423,10 @@ function editOdometer(vid, odo) {
 }
 
 function editInterval(vid, serviceId) {
-  const base = SCHEDULES[vid].find((s) => s.service === serviceId);
-  const cur = scheduleFor(vid, setting(`intervals:${vid}`, {})).find((s) => s.service === serviceId);
+  const base = scheduleFor(vid, {}, mode()).find((s) => s.service === serviceId);
+  const cur = scheduleFor(vid, setting(`intervals:${vid}`, {}), mode()).find((s) => s.service === serviceId);
   sheet(`<h3>${esc(SERVICES[serviceId].name)}</h3>
-    <p class="muted small">Default: every ${base.miles ? base.miles.toLocaleString() + ' mi' : '—'} / ${base.months ? base.months + ' months' : '—'}</p>
+    <p class="muted small">${mode() === 'essential' ? 'Essentials' : 'Full schedule'} default: every ${base.miles ? base.miles.toLocaleString() + ' mi' : '—'} / ${base.months ? base.months + ' months' : '—'}</p>
     <div class="row">
       <label>Miles<input type="number" inputmode="numeric" id="mi" value="${cur.miles ?? ''}" placeholder="none"></label>
       <label>Months<input type="number" inputmode="numeric" id="mo" value="${cur.months ?? ''}" placeholder="none"></label>
@@ -303,6 +513,7 @@ function renderEdit(manual) {
           <input type="file" accept="image/*" capture="environment" id="cam" hidden></label>
         <label class="btn ghost">🖼 Library<input type="file" accept="image/*" id="lib" multiple hidden></label>
       </div>
+      <button type="button" class="link" id="pasteBtn">📋 Paste receipt text instead</button>
       <div id="ocrStatus" class="muted small"></div>
     </section>`}
 
@@ -328,6 +539,8 @@ function renderEdit(manual) {
       </div>
     </fieldset>
 
+    ${d.inspection ? inspectionSummary(d.inspection) : ''}
+
     <label>Notes / recommendations from the shop
       <textarea id="notes" rows="3" placeholder="e.g. Front pads at 4mm — replace next visit">${esc(d.notes)}</textarea></label>
 
@@ -351,6 +564,8 @@ function renderEdit(manual) {
   app.querySelectorAll('[data-rm]').forEach((b) => {
     b.onclick = () => { d.images.splice(+b.dataset.rm, 1); renderEdit(manual); };
   });
+  const pasteBtn = document.getElementById('pasteBtn');
+  if (pasteBtn) pasteBtn.onclick = () => pasteText(manual);
   for (const id of ['cam', 'lib']) {
     const input = document.getElementById(id);
     if (input) input.onchange = () => handleFiles([...input.files], manual);
@@ -419,22 +634,109 @@ async function handleFiles(files, manual) {
       text += data.text + '\n';
     }
     d.ocrText = (d.ocrText ? d.ocrText + '\n' : '') + text.trim();
-    const p = parseReceipt(d.ocrText);
-    const filled = [];
-    if (p.vehicleId && !d.vehicleId) { d.vehicleId = p.vehicleId; filled.push('vehicle'); }
-    if (p.date) { d.date = p.date; filled.push('date'); }
-    if (p.mileage && !d.mileage) { d.mileage = p.mileage; filled.push('mileage'); }
-    if (p.total) { d.total = p.total; filled.push('total'); }
-    if (p.shop && !d.shop) { d.shop = p.shop; filled.push('shop'); }
-    if (p.services.length) { d.services = [...new Set([...d.services, ...p.services])]; filled.push(`${p.services.length} service${p.services.length > 1 ? 's' : ''}`); }
-    renderEdit(manual);
-    setStatus(filled.length
-      ? `✓ Filled in ${filled.join(', ')}. Please check everything, especially mileage, before saving.`
-      : 'Couldn\'t pick out details automatically. Please fill in the form. The photo is still saved.');
+    applyReceiptText(manual, false);
   } catch (err) {
     console.error(err);
     setStatus(`⚠︎ ${esc(err.message || 'Text reading failed')}. You can still fill in the form by hand. The photo is saved with the record.`);
   }
+}
+
+// Fill the form from d.ocrText. With `replace`, detected values overwrite what's
+// already there (used for pasted text, so you can paste again to retry).
+function applyReceiptText(manual, replace) {
+  const d = draft;
+  const p = parseReceipt(d.ocrText);
+  if (p.history) return showHistory(manual, p);
+  const filled = [];
+  d.inspection = p.inspection || null;
+  if (p.inspection) {
+    // Recommended work wasn't done: record only the inspection, no cost.
+    d.services = ['inspection'];
+    d.total = '';
+  }
+  if (p.vehicleId && (replace || !d.vehicleId)) { d.vehicleId = p.vehicleId; filled.push('vehicle'); }
+  if (p.date) { d.date = p.date; filled.push('date'); }
+  if (p.mileage && (replace || !d.mileage)) { d.mileage = p.mileage; filled.push('mileage'); }
+  if (p.total) { d.total = p.total; filled.push('total'); }
+  if (p.shop && (replace || !d.shop)) { d.shop = p.shop; filled.push('shop'); }
+  if (p.notes && (replace || !d.notes)) { d.notes = p.notes; filled.push('shop notes'); }
+  if (p.services.length && !p.inspection) {
+    d.services = replace ? p.services : [...new Set([...d.services, ...p.services])];
+    filled.push(`${p.services.length} service${p.services.length > 1 ? 's' : ''}`);
+  }
+  renderEdit(manual);
+  const s = document.getElementById('ocrStatus');
+  if (s) {
+    s.innerHTML = p.otherVehicle
+      ? `<span class="warn">⚠︎ This looks like a different vehicle: <b>${esc(p.otherVehicle.description || 'unknown vehicle')}</b> (VIN ${esc(p.otherVehicle.vin)}). It doesn't match any of your three cars, so the vehicle was left blank. Don't save it unless it's really for one of your cars.</span>`
+      : p.inspection
+      ? `✓ Read as a <b>dealer inspection</b>: ${p.inspection.recommendations.length} recommendations (not recorded as done)${Object.keys(p.inspection.tread).length ? ', tire tread' : ''}${Object.keys(p.inspection.pads).length ? ', brake pads' : ''}. After saving, the car's Schedule tab shows what's really needed.`
+      : filled.length
+      ? `✓ Filled in ${filled.join(', ')}. Please check everything, especially the date and mileage, before saving.`
+      : 'Couldn\'t pick out details automatically. Please fill in the form.';
+  }
+}
+
+// A vehicle history report (AutoCheck / Carfax): offer to import past visits
+// and the real in-service date instead of saving it as one record.
+function showHistory(manual, p) {
+  const d = draft;
+  const h = p.history;
+  if (p.vehicleId) d.vehicleId = p.vehicleId;
+  renderEdit(manual);
+  const s = document.getElementById('ocrStatus');
+  if (!s) return;
+  const v = vehicle(d.vehicleId);
+  const existing = vehicleRecords(state.records, d.vehicleId);
+  const fresh = h.visits.filter((x) => !existing.some((r) => r.date === x.date));
+  s.innerHTML = `<div class="card history-import">
+    <h3>📜 Vehicle history report${v ? ` · ${esc(vName(v))}` : ''}</h3>
+    ${h.inService ? `<p class="small">In service since <b>${fmtDate(h.inService)}</b>. Time-based items will count from this date.</p>` : ''}
+    <p class="small">${h.visits.length} past service visit${h.visits.length === 1 ? '' : 's'} found${fresh.length < h.visits.length ? ` (${h.visits.length - fresh.length} already in the app)` : ''}:</p>
+    <ul class="plan-list">${h.visits.map((x) => `<li>${fmtDate(x.date)}${x.mileage ? ' · ' + fmtMiles(x.mileage) : ''} <span class="muted small">· ${x.services.map((id) => esc(SERVICES[id].name)).join(', ')}</span></li>`).join('')}</ul>
+    <p class="muted small">History reports only say things like "Battery serviced" or "Transmission serviced". That can mean a check rather than a replacement, so treat these as approximate.</p>
+    ${v ? `<button class="btn full" id="importHistory">Import ${fresh.length} visit${fresh.length === 1 ? '' : 's'}${h.inService ? ' + in-service date' : ''}</button>` : '<p class="warn small">Choose the vehicle above first, then paste again.</p>'}
+  </div>`;
+  const btn = document.getElementById('importHistory');
+  if (btn) btn.onclick = async () => {
+    for (const x of fresh) {
+      await db.put('records', {
+        id: uid(), vehicleId: d.vehicleId, date: x.date, mileage: x.mileage, shop: x.source || 'From history report',
+        total: null, services: x.services, notes: `From vehicle history report: ${x.details}`, ocrText: '',
+        imageIds: [], source: 'history', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      });
+    }
+    if (h.inService) await saveSetting(`inService:${d.vehicleId}`, h.inService);
+    const vid = d.vehicleId;
+    draft = null;
+    await loadState();
+    toast(`Imported ${fresh.length} visit${fresh.length === 1 ? '' : 's'}`);
+    go(`#/v/${vid}/history`);
+  };
+}
+
+function pasteText(manual) {
+  const hasText = !!draft.ocrText;
+  sheet(`<h3>Paste receipt text</h3>
+    <p class="muted small">On iPhone: open the receipt photo, press and hold on the text, then tap Select All → Copy. Android: open the photo in Google Photos or Lens, then tap Text → Copy.</p>
+    ${hasText ? '<p class="small"><b>Multi-page receipt?</b> Paste the next page and tap <b>Add as next page</b>. The pages are read together.</p>' : ''}
+    <label>Receipt text<textarea id="pasted" rows="10" placeholder="Paste the receipt text here"></textarea></label>
+    <div class="row">
+      ${hasText ? '<button class="btn ghost" id="replaceText">Replace text</button><button class="btn" id="appendText">Add as next page</button>'
+        : '<button class="btn ghost" data-close>Cancel</button><button class="btn" id="replaceText">Read text</button>'}
+    </div>`,
+  (el, close) => {
+    const read = (append) => {
+      const text = el.querySelector('#pasted').value.trim();
+      if (!text) return toast('Paste some text first');
+      draft.ocrText = append ? `${draft.ocrText}\n${text}` : text;
+      close();
+      applyReceiptText(manual, true);
+    };
+    el.querySelector('#replaceText').onclick = () => read(false);
+    const appendBtn = el.querySelector('#appendText');
+    if (appendBtn) appendBtn.onclick = () => read(true);
+  });
 }
 
 async function saveDraft() {
@@ -450,10 +752,11 @@ async function saveDraft() {
     id: d.id,
     vehicleId: d.vehicleId,
     date: d.date,
-    mileage: d.mileage === '' ? null : Number(d.mileage),
+    mileage: d.mileage === '' || d.mileage == null ? null : Number(d.mileage),
     shop: d.shop.trim(),
-    total: d.total === '' ? null : Number(d.total),
+    total: d.total === '' || d.total == null ? null : Number(d.total),
     services: d.services,
+    inspection: d.inspection || null,
     notes: d.notes.trim(),
     ocrText: d.ocrText,
     imageIds: keepIds,
@@ -491,6 +794,7 @@ async function viewRecord(id) {
       <h3>Services</h3>
       <ul class="svc-list">${r.services.map((s) => `<li>✓ ${esc(SERVICES[s]?.name || s)}</li>`).join('')}</ul>
       ${r.notes ? `<h3>Notes</h3><p class="pre">${esc(r.notes)}</p>` : ''}
+      ${r.inspection ? inspectionSummary(r.inspection) : ''}
     </div>
     ${imgs.map((u, i) => `<a href="${u}" target="_blank" rel="noopener"><img class="receipt-img" src="${u}" alt="Receipt page ${i + 1}"></a>`).join('')}
     ${r.ocrText ? `<details><summary>Receipt text</summary><pre class="ocr">${esc(r.ocrText)}</pre></details>` : ''}
@@ -544,10 +848,22 @@ async function importBackup(file) {
     const data = JSON.parse(await file.text());
     if (data.app !== 'car-service') throw new Error('Not a Car Service backup file');
     for (const img of data.images || []) await db.put('images', { id: img.id, blob: await dataURLToBlob(img.data) });
-    for (const r of data.records || []) await db.put('records', r);
+    // Add records without touching existing ones. Skip a record that duplicates
+    // one already here (same car, date and services) so importing twice is safe.
+    const key = (r) => `${r.vehicleId}|${r.date}|${[...(r.services || [])].sort().join(',')}`;
+    const have = new Set(state.records.map(key));
+    const ids = new Set(state.records.map((r) => r.id));
+    let added = 0;
+    let skipped = 0;
+    for (const r of data.records || []) {
+      if (ids.has(r.id) || have.has(key(r))) { skipped++; continue; }
+      await db.put('records', r);
+      have.add(key(r));
+      added++;
+    }
     for (const [k, v] of Object.entries(data.settings || {})) await db.setSetting(k, v);
     await loadState();
-    toast(`Imported ${data.records?.length || 0} records`);
+    toast(`Imported ${added} new record${added === 1 ? '' : 's'}${skipped ? ` · ${skipped} already in the app` : ''}`);
     render();
   } catch (e) {
     alert('Import failed: ' + e.message);
@@ -567,6 +883,8 @@ function exportCSV() {
 function viewSettings() {
   app.innerHTML = `${header('Settings & backup', '#/')}
   <main>
+    <h2>Schedule mode</h2>
+    ${modeToggle()}
     <div class="card">
       <h3>Your data lives on this phone</h3>
       <p class="small">Receipts and records are stored privately in this browser on this device. Nothing is uploaded. Export a backup now and then (save it to Files, iCloud Drive or Google Drive) so you don't lose your history if you clear browser data or change phones.</p>
@@ -585,6 +903,7 @@ function viewSettings() {
     </div>
     <p class="muted small center">${state.records.length} records stored</p>
   </main>`;
+  bindModeToggle();
   document.getElementById('exp').onclick = exportBackup;
   document.getElementById('csv').onclick = exportCSV;
   document.getElementById('imp').onchange = (e) => e.target.files[0] && importBackup(e.target.files[0]);
