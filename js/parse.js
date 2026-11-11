@@ -509,8 +509,16 @@ export function detectPurchase(text, force = false) {
   // so take the largest dollar figure as the total.
   let fallback = null;
   if (force && price == null && totalPaid == null) {
-    const all = (text.match(/\$?\s?\d{1,3}(?:,\d{3})+(?:\.\d{2})?|\$\s?\d{4,6}(?:\.\d{2})?/g) || [])
-      .map((a) => +a.replace(/[$,\s]/g, '')).filter((v) => v >= 1000 && v < 500000);
+    // Only figures written as money ($ sign or cents), and never on a
+    // mileage / odometer / VIN / stock line: "23,456" miles is not a price.
+    const all = [];
+    for (const line of splitLines(text)) {
+      if (/(mile|odometer|odo\b|\bmi\b|vin|stock|order|deal\s*#|zip|phone)/i.test(line)) continue;
+      for (const a of line.match(/\$\s?\d{1,3}(?:,\d{3})+(?:\.\d{2})?|\$\s?\d{4,6}(?:\.\d{2})?|\b\d{1,3}(?:,\d{3})+\.\d{2}\b|\b\d{4,6}\.\d{2}\b/g) || []) {
+        const v = +a.replace(/[$,\s]/g, '');
+        if (v >= 1000 && v < 500000) all.push(v);
+      }
+    }
     if (all.length) fallback = Math.max(...all);
   }
   return { price, totalPaid: totalPaid ?? fallback, tax, tradeIn, financed, seller, date, regExpires };

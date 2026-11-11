@@ -580,7 +580,7 @@ function renderEdit(manual) {
     <label>Notes / recommendations from the shop
       <textarea id="notes" rows="3" placeholder="e.g. Front pads at 4mm — replace next visit">${esc(d.notes)}</textarea></label>
 
-    ${d.ocrText ? `<details><summary>Text read from receipt</summary><pre class="ocr">${esc(d.ocrText)}</pre></details>
+    ${d.ocrText ? `<details><summary>Text read from receipt</summary><pre class="ocr">${esc(d.ocrText)}</pre><button type="button" class="btn ghost full copy-text">📋 Copy text</button></details>
     <div class="row reread"><button type="button" class="btn ghost" id="reread">↻ Re-read receipt text</button><button type="button" class="btn ghost" id="rereadPurchase">🔑 Read as a purchase</button></div>` : ''}
 
     <button class="btn full" id="saveRec">Save</button>
@@ -887,7 +887,7 @@ async function viewRecord(id) {
       ${r.inspection ? inspectionSummary(r.inspection) : ''}
     </div>
     ${imgs.map((u, i) => `<a href="${u}" target="_blank" rel="noopener"><img class="receipt-img" src="${u}" alt="Receipt page ${i + 1}"></a>`).join('')}
-    ${r.ocrText ? `<details><summary>Receipt text</summary><pre class="ocr">${esc(r.ocrText)}</pre></details>` : ''}
+    ${r.ocrText ? `<details><summary>Receipt text</summary><pre class="ocr">${esc(r.ocrText)}</pre><button type="button" class="btn ghost full copy-text">📋 Copy text</button></details>` : ''}
     <div class="row">
       <a class="btn secondary" href="#/edit/${r.id}">Edit</a>
       <button class="btn danger" id="del">Delete</button>
@@ -1015,6 +1015,28 @@ async function render() {
   if (parts[0] === 'settings') return viewSettings();
   return viewHome();
 }
+
+// "Copy text" next to stored receipt text. Falls back to selecting the text
+// so it can be copied by hand if the clipboard isn't available.
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.copy-text');
+  if (!btn) return;
+  const pre = btn.parentElement.querySelector('pre.ocr');
+  if (!pre) return;
+  try {
+    await navigator.clipboard.writeText(pre.textContent);
+    toast('Copied. Paste it wherever you need it.');
+  } catch {
+    const range = document.createRange();
+    range.selectNodeContents(pre);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    let copied = false;
+    try { copied = document.execCommand('copy'); } catch { /* not supported */ }
+    toast(copied ? 'Copied. Paste it wherever you need it.' : 'Text selected. Tap Copy.');
+  }
+});
 
 window.addEventListener('hashchange', () => {
   // Close any open sheet when moving to another screen.
