@@ -150,7 +150,7 @@ function mileageValue(str) {
 
 export function detectMileage(text) {
   const lines = splitLines(text);
-  const labelled = /(mileage|odometer|odo\b|miles\s*in|mi\s*in|in\s*miles|km\s*in|current\s*miles)/i;
+  const labelled = /(mileage|odometer|odo\b|^miles\b|miles\s*in|mi\s*in|in\s*miles|km\s*in|current\s*miles)/i;
   const skip = /(next|due|recommend|return)/i;
   // 1. "Mileage In: 41,236" on one line, or the number on the next line.
   // With "In: 57244 / Out: 57244", only look before "Out".
@@ -475,9 +475,11 @@ function futureDate(str) {
   return null;
 }
 
-export function detectPurchase(text) {
+// `force`: the user said this is a purchase document, so read it as one even
+// if it doesn't look like the layouts we know.
+export function detectPurchase(text, force = false) {
   const weak = new Set((text.match(PURCHASE_WEAK) || []).map((w) => w.toLowerCase()));
-  if (!PURCHASE_STRONG.test(text) && weak.size < 2) return null;
+  if (!force && !PURCHASE_STRONG.test(text) && weak.size < 2) return null;
   const lines = splitLines(text);
   const price = labelledAmount(lines, /(base price of vehicle|base price|cash price of vehicle|vehicle (sales |selling )?price|sales price|selling price|sale price|purchase price|price of vehicle|cash price)/i, /total/i)
     ?? labelledAmount(lines, /total cash price/i);
@@ -503,7 +505,15 @@ export function detectPurchase(text) {
       regExpires = futureDate(lines[i]) || futureDate(lines[i + 1] || '');
     }
   }
-  return { price, totalPaid, tax, tradeIn, financed, seller, date, regExpires };
+  // Unknown layout: the vehicle is by far the biggest amount on the page,
+  // so take the largest dollar figure as the total.
+  let fallback = null;
+  if (force && price == null && totalPaid == null) {
+    const all = (text.match(/\$?\s?\d{1,3}(?:,\d{3})+(?:\.\d{2})?|\$\s?\d{4,6}(?:\.\d{2})?/g) || [])
+      .map((a) => +a.replace(/[$,\s]/g, '')).filter((v) => v >= 1000 && v < 500000);
+    if (all.length) fallback = Math.max(...all);
+  }
+  return { price, totalPaid: totalPaid ?? fallback, tax, tradeIn, financed, seller, date, regExpires };
 }
 
 export function purchaseNotes(pu) {
@@ -516,6 +526,20 @@ export function purchaseNotes(pu) {
   if (pu.financed) parts.push(`financed ${$(pu.financed)}`);
   if (pu.regExpires) parts.push(`registration expires ${pu.regExpires}`);
   return parts.length ? `Purchase: ${parts.join(', ')}.` : '';
+}
+
+export function parseAsPurchase(text) {
+  const purchase = detectPurchase(text, true);
+  return {
+    vehicleId: detectVehicle(text),
+    date: purchase.date || detectDate(text),
+    mileage: detectMileage(text),
+    total: purchase.price ?? purchase.totalPaid,
+    shop: purchase.seller,
+    services: ['purchase'],
+    notes: purchaseNotes(purchase),
+    purchase,
+  };
 }
 
 export function parseReceipt(text) {

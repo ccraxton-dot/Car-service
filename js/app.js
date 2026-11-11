@@ -1,6 +1,6 @@
 import { VEHICLES, SERVICES, SCHEDULES, TIPS, GENERAL_TIPS } from './data.js';
 import * as db from './db.js';
-import { parseReceipt, toISODate, purchaseNotes } from './parse.js';
+import { parseReceipt, parseAsPurchase, toISODate, purchaseNotes } from './parse.js';
 import { odometer, dueItems, vehicleRecords, defaultInService, scheduleFor, planVisits } from './schedule.js';
 import { SAVE_MONEY_TIPS } from './essentials.js';
 
@@ -580,7 +580,8 @@ function renderEdit(manual) {
     <label>Notes / recommendations from the shop
       <textarea id="notes" rows="3" placeholder="e.g. Front pads at 4mm — replace next visit">${esc(d.notes)}</textarea></label>
 
-    ${d.ocrText ? `<details><summary>Text read from receipt</summary><pre class="ocr">${esc(d.ocrText)}</pre></details>` : ''}
+    ${d.ocrText ? `<details><summary>Text read from receipt</summary><pre class="ocr">${esc(d.ocrText)}</pre></details>
+    <div class="row reread"><button type="button" class="btn ghost" id="reread">↻ Re-read receipt text</button><button type="button" class="btn ghost" id="rereadPurchase">🔑 Read as a purchase</button></div>` : ''}
 
     <button class="btn full" id="saveRec">Save</button>
   </main>`;
@@ -593,13 +594,20 @@ function renderEdit(manual) {
   document.getElementById('vehicleId').onchange = (e) => { d.vehicleId = e.target.value; renderEdit(manual); };
   app.querySelectorAll('.check input').forEach((cb) => {
     cb.onchange = () => {
+      if (cb.value === 'purchase' && cb.checked && d.ocrText) return applyReceiptText(manual, true, true);
+      if (cb.value === 'purchase' && !cb.checked) d.purchase = null;
       d.services = cb.checked ? [...new Set([...d.services, cb.value])] : d.services.filter((s) => s !== cb.value);
       cb.parentElement.classList.toggle('on', cb.checked);
+      if (cb.value === 'purchase') renderEdit(manual);
     };
   });
   app.querySelectorAll('[data-rm]').forEach((b) => {
     b.onclick = () => { d.images.splice(+b.dataset.rm, 1); renderEdit(manual); };
   });
+  const reread = document.getElementById('reread');
+  if (reread) reread.onclick = () => applyReceiptText(manual, true);
+  const rereadPurchase = document.getElementById('rereadPurchase');
+  if (rereadPurchase) rereadPurchase.onclick = () => applyReceiptText(manual, true, true);
   const pasteBtn = document.getElementById('pasteBtn');
   if (pasteBtn) pasteBtn.onclick = () => pasteText(manual);
   for (const id of ['cam', 'lib']) {
@@ -679,9 +687,9 @@ async function handleFiles(files, manual) {
 
 // Fill the form from d.ocrText. With `replace`, detected values overwrite what's
 // already there (used for pasted text, so you can paste again to retry).
-function applyReceiptText(manual, replace) {
+function applyReceiptText(manual, replace, asPurchase = false) {
   const d = draft;
-  const p = parseReceipt(d.ocrText);
+  const p = asPurchase ? parseAsPurchase(d.ocrText) : parseReceipt(d.ocrText);
   if (p.history) return showHistory(manual, p);
   const filled = [];
   d.inspection = p.inspection || null;
@@ -694,7 +702,8 @@ function applyReceiptText(manual, replace) {
   if (p.vehicleId && (replace || !d.vehicleId)) { d.vehicleId = p.vehicleId; filled.push('vehicle'); }
   if (p.date) { d.date = p.date; filled.push('date'); }
   if (p.mileage && (replace || !d.mileage)) { d.mileage = p.mileage; filled.push('mileage'); }
-  if (p.total) { d.total = p.total; filled.push('total'); }
+  if (p.total) { d.total = p.total; filled.push(p.purchase ? 'price' : 'total'); }
+  if (p.purchase) { d.shop = p.shop || d.shop; d.notes = p.notes || d.notes; }
   if (p.shop && (replace || !d.shop)) { d.shop = p.shop; filled.push('shop'); }
   if (p.notes && (replace || !d.notes)) { d.notes = p.notes; filled.push('shop notes'); }
   if (p.services.length && !p.inspection) {

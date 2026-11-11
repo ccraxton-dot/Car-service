@@ -267,3 +267,5 @@ a.link { color: var(--accent-blue); font-weight: 600; display: inline-block; mar
 .owned-line { margin-top: 8px; }
 a.owned { display: block; color: var(--text); }
 .tag { white-space: nowrap; display: inline-block; }
+.reread { margin-bottom: 8px; }
+.reread .btn { font-size: .9rem; padding: 10px; }
