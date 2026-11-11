@@ -736,13 +736,17 @@ function showHistory(manual, p) {
   if (!s) return;
   const v = vehicle(d.vehicleId);
   const existing = vehicleRecords(state.records, d.vehicleId);
-  const fresh = h.visits.filter((x) => !existing.some((r) => r.date === x.date));
+  // Already in the app = same date and at least one of the same services
+  // (a purchase record on that date doesn't count as the service visit).
+  const fresh = h.visits.filter((x) => !existing.some((r) => r.date === x.date
+    && (r.services || []).some((sv) => sv !== 'purchase' && x.services.includes(sv))));
   const pu = p.purchase && (p.purchase.price || p.date) ? p.purchase : null;
-  const hasPurchase = pu && existing.some((r) => (r.services || []).includes('purchase') && r.date === p.date);
+  const oldPurchase = pu ? existing.find((r) => (r.services || []).includes('purchase')) : null;
+  const hasPurchase = !!(oldPurchase && oldPurchase.date === p.date && oldPurchase.total === (pu.price ?? pu.totalPaid ?? null));
   const addPurchase = pu && !hasPurchase;
   s.innerHTML = `<div class="card history-import">
     <h3>📜 ${pu ? 'Purchase + vehicle history' : 'Vehicle history report'}${v ? ` · ${esc(vName(v))}` : ''}</h3>
-    ${pu ? `<p class="small"><b>Bought ${p.date ? fmtDate(p.date) : ''}</b>${p.mileage ? ' at ' + fmtMiles(p.mileage) : ''}${pu.price ? ' for ' + fmtMoney(pu.price) : ''}${pu.seller ? ' from ' + esc(pu.seller) : ''}${hasPurchase ? ' <span class="muted">(already in the app)</span>' : ''}.</p>` : ''}
+    ${pu ? `<p class="small"><b>Bought ${p.date ? fmtDate(p.date) : ''}</b>${p.mileage ? ' at ' + fmtMiles(p.mileage) : ''}${pu.price ? ' for ' + fmtMoney(pu.price) : ''}${pu.seller ? ' from ' + esc(pu.seller) : ''}${hasPurchase ? ' <span class="muted">(already in the app)</span>' : oldPurchase ? ' <span class="muted">(will update the purchase record already in the app)</span>' : ''}.</p>` : ''}
     ${h.inService ? `<p class="small">In service since <b>${fmtDate(h.inService)}</b>. Time-based items will count from this date.</p>` : ''}
     <p class="small">${h.visits.length} past service visit${h.visits.length === 1 ? '' : 's'} found${fresh.length < h.visits.length ? ` (${h.visits.length - fresh.length} already in the app)` : ''}:</p>
     <ul class="plan-list">${h.visits.map((x) => `<li>${fmtDate(x.date)}${x.mileage ? ' · ' + fmtMiles(x.mileage) : ''} <span class="muted small">· ${x.services.map((id) => esc(SERVICES[id].name)).join(', ')}</span></li>`).join('')}</ul>
@@ -760,17 +764,19 @@ function showHistory(manual, p) {
     }
     if (addPurchase) {
       for (const im of d.images) await db.put('images', { id: im.id, blob: im.blob });
+      const imageIds = [...new Set([...(oldPurchase?.imageIds || []), ...d.images.map((im) => im.id)])];
       await db.put('records', {
-        id: uid(), vehicleId: d.vehicleId, date: p.date || toISODate(new Date()), mileage: p.mileage, shop: pu.seller || '',
+        ...(oldPurchase || {}),
+        id: oldPurchase ? oldPurchase.id : uid(), vehicleId: d.vehicleId, date: p.date || toISODate(new Date()), mileage: p.mileage, shop: pu.seller || '',
         total: pu.price ?? pu.totalPaid ?? null, services: ['purchase'], notes: purchaseNotes(pu), ocrText: d.ocrText,
-        imageIds: d.images.map((im) => im.id), purchase: pu, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        imageIds, purchase: pu, createdAt: oldPurchase?.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString(),
       });
     }
     if (h.inService) await saveSetting(`inService:${d.vehicleId}`, h.inService);
     const vid = d.vehicleId;
     draft = null;
     await loadState();
-    toast(`Imported ${addPurchase ? 'purchase + ' : ''}${fresh.length} visit${fresh.length === 1 ? '' : 's'}`);
+    toast(`Imported ${addPurchase ? (oldPurchase ? 'updated purchase + ' : 'purchase + ') : ''}${fresh.length} visit${fresh.length === 1 ? '' : 's'}`);
     go(`#/v/${vid}/history`);
   };
 }
