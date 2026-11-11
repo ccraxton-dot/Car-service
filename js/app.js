@@ -1,6 +1,6 @@
 import { VEHICLES, SERVICES, SCHEDULES, TIPS, GENERAL_TIPS } from './data.js';
 import * as db from './db.js';
-import { parseReceipt, toISODate } from './parse.js';
+import { parseReceipt, toISODate, purchaseNotes } from './parse.js';
 import { odometer, dueItems, vehicleRecords, defaultInService, scheduleFor, planVisits } from './schedule.js';
 import { SAVE_MONEY_TIPS } from './essentials.js';
 
@@ -124,6 +124,35 @@ function shopNotes(vid) {
     .map((r) => ({ ...r, notes: (r.notes || '').split('\n').filter((l) => !/^State inspection: PASS/i.test(l) && !/^From vehicle history report/i.test(l)).join('\n') }))
     .filter((r) => r.notes && !r.inspection && new Date(r.date + 'T12:00:00') >= cutoff)
     .slice(0, 2);
+}
+
+// ---------- ownership ----------
+function purchaseRecord(vid) {
+  return vehicleRecords(state.records, vid).find((r) => (r.services || []).includes('purchase')) || null;
+}
+const isPurchaseRec = (r) => (r.services || []).includes('purchase');
+const prevOwner = (r, buy) => buy && !isPurchaseRec(r) && r.date < buy.date;
+
+function ownedLine(vid) {
+  const buy = purchaseRecord(vid);
+  if (!buy) return `<a class="link small" href="#/add?v=${vid}&s=purchase">＋ Add purchase details (bill of sale, buyer's order, title)</a>`;
+  return `<a class="owned small" href="#/r/${buy.id}">🔑 Bought <b>${fmtDate(buy.date)}</b>${buy.mileage ? ' at ' + fmtMiles(buy.mileage) : ''}${buy.total ? ' for ' + fmtMoney(buy.total) : ''}${buy.shop ? ' from ' + esc(buy.shop) : ''}</a>`;
+}
+
+// Registration renewal: Texas needs a passing inspection in the 90 days before.
+function registrationCard(vid, items) {
+  const buy = purchaseRecord(vid);
+  const exp = setting(`regExpires:${vid}`, buy?.purchase?.regExpires || null);
+  if (!exp || !items.some((i) => i.service === 'state_inspection')) return '';
+  let due = new Date(exp + 'T12:00:00');
+  const now = new Date();
+  while (due < now) due.setFullYear(due.getFullYear() + 1);  // rolls forward each year
+  const days = Math.round((due - now) / 86400000);
+  if (days > 90) return '';
+  const insp = vehicleRecords(state.records, vid).find((r) => (r.services || []).includes('state_inspection'));
+  const inspOk = insp && (due - new Date(insp.date + 'T12:00:00')) / 86400000 <= 90;
+  return `<div class="card shop-notes"><h3>🪪 Registration renews ${fmtDate(due)}</h3>
+    <p class="small">${inspOk ? `Inspection done ${fmtDate(insp.date)}, so you can renew online now at TxDMV.` : 'Get the state emissions inspection first (any quick-lube shop, about 15 min), then renew online at TxDMV.'}</p></div>`;
 }
 
 function notesCard(vid) {
@@ -331,12 +360,13 @@ function viewHome() {
   bindModeToggle();
 }
 
-function recordRow(r) {
+function recordRow(r, buy = purchaseRecord(r.vehicleId)) {
   const v = vehicle(r.vehicleId);
+  const tag = isPurchaseRec(r) ? ' <span class="tag diy">purchase</span>' : prevOwner(r, buy) ? ' <span class="tag">previous owner</span>' : '';
   const names = (r.services || []).map((s) => SERVICES[s]?.name || s);
   return `<a class="card record" href="#/r/${r.id}">
     <div class="record-main">
-      <div class="record-title">${esc(names.slice(0, 3).join(', ') || 'Service')}${names.length > 3 ? ` +${names.length - 3}` : ''}</div>
+      <div class="record-title">${esc(names.slice(0, 3).join(', ') || 'Service')}${names.length > 3 ? ` +${names.length - 3}` : ''}${tag}</div>
       <div class="muted small">${v ? `<span class="dot" style="background:${v.color}"></span>${esc(v.model)} · ` : ''}${fmtDate(r.date)}${r.mileage ? ' · ' + fmtMiles(r.mileage) : ''}${r.shop ? ' · ' + esc(r.shop) : ''}</div>
     </div>
     <div class="record-side">${r.total ? `<b>${fmtMoney(r.total)}</b>` : ''}${r.imageIds?.length ? '<span class="clip">📎</span>' : ''}</div>
@@ -348,21 +378,25 @@ function viewVehicle(vid, tab = 'due') {
   if (!v) return go('#/');
   const { odo, items } = vehicleStatus(vid);
   const recs = vehicleRecords(state.records, vid);
-  const spent = recs.reduce((s, r) => s + (Number(r.total) || 0), 0);
+  const buy = purchaseRecord(vid);
+  const mine = recs.filter((r) => !isPurchaseRec(r) && !prevOwner(r, buy));
+  const spent = mine.reduce((s, r) => s + (Number(r.total) || 0), 0);
+  const drivenSince = buy && buy.mileage && odo.miles ? odo.miles - buy.mileage : null;
 
   let body = '';
   if (tab === 'due') {
     const tracked = items.filter((i) => i.status !== 'wait');
     const waiting = items.filter((i) => i.status === 'wait');
-    body = modeToggle() + inspectionCard(vid, items) + wearCard(vid, odo) + notesCard(vid) + planCard(items) + tracked.map(itemCard).join('')
+    body = modeToggle() + registrationCard(vid, items) + inspectionCard(vid, items) + wearCard(vid, odo) + notesCard(vid) + planCard(items) + tracked.map(itemCard).join('')
       + (waiting.length ? `<h2>Can wait: go when you notice these signs</h2>${waiting.map(itemCard).join('')}` : '');
   } else if (tab === 'history') {
     body = `<div class="stats">
-        <div><b>${recs.length}</b><span>visits</span></div>
-        <div><b>${fmtMoney(spent) || '$0'}</b><span>total spent</span></div>
+        <div><b>${mine.length}</b><span>${buy ? 'visits since buying' : 'visits'}</span></div>
+        <div><b>${fmtMoney(spent) || '$0'}</b><span>${buy ? 'service since buying' : 'total spent'}</span></div>
         <div><b>${odo.perYear.toLocaleString()}</b><span>${odo.rateKnown ? 'mi / year' : 'mi / yr (assumed)'}</span></div>
       </div>
-      ${recs.length ? recs.map(recordRow).join('') : '<p class="empty">No service records for this vehicle yet.</p>'}`;
+      ${buy && buy.total ? `<p class="small muted center">Purchase ${fmtMoney(buy.total)} + service ${fmtMoney(spent) || '$0'} = <b>${fmtMoney(buy.total + spent)}</b> so far${drivenSince > 0 ? ` · ${drivenSince.toLocaleString()} mi driven since buying` : ''}</p>` : ''}
+      ${recs.length ? recs.map((r) => recordRow(r, buy)).join('') : '<p class="empty">No service records for this vehicle yet.</p>'}`;
   } else {
     body = (TIPS[vid] || []).map((t) => `<div class="card tip"><h3>${esc(t.title)}</h3><p>${esc(t.body)}</p></div>`).join('')
       + `<h2>Spend less, visit the shop less</h2><ul class="tips">${SAVE_MONEY_TIPS.map((t) => `<li>${esc(t)}</li>`).join('')}</ul>
@@ -375,6 +409,7 @@ function viewVehicle(vid, tab = 'due') {
     <div class="hero" style="--accent:${v.color}">
       <div class="plate big">${esc(v.plate)}</div>
       <div class="muted small">${esc(v.powertrain)}</div>
+      <div class="owned-line">${ownedLine(vid)}</div>
       <button class="odo-btn" id="odoBtn">
         <span class="muted small">Odometer${odo.estimated ? ' (estimated)' : ''}</span>
         <span class="odo-val">${odo.miles != null ? `${odo.estimated ? '~' : ''}${fmtMiles(odo.miles)}` : 'Tap to set'}</span>
@@ -501,6 +536,7 @@ function serviceOptions(vid) {
 function renderEdit(manual) {
   const d = draft;
   const opts = serviceOptions(d.vehicleId);
+  const isPurchase = d.services.includes('purchase');
   app.innerHTML = `${header(d.isNew ? 'Add service' : 'Edit service', d.isNew ? (d.vehicleId ? `#/v/${d.vehicleId}` : '#/') : `#/r/${d.id}`)}
   <main class="form">
     ${manual && d.isNew && !d.images.length ? '' : `
@@ -528,8 +564,8 @@ function renderEdit(manual) {
       <label>Mileage<input type="number" inputmode="numeric" id="mileage" value="${esc(d.mileage)}" placeholder="e.g. 24350"></label>
     </div>
     <div class="row">
-      <label>Shop<input type="text" id="shop" value="${esc(d.shop)}" placeholder="Dealer / shop"></label>
-      <label>Total $<input type="number" inputmode="decimal" step="0.01" id="total" value="${esc(d.total)}"></label>
+      <label>${isPurchase ? 'Seller / dealer' : 'Shop'}<input type="text" id="shop" value="${esc(d.shop)}" placeholder="${isPurchase ? 'Who you bought it from' : 'Dealer / shop'}"></label>
+      <label>${isPurchase ? 'Price $' : 'Total $'}<input type="number" inputmode="decimal" step="0.01" id="total" value="${esc(d.total)}"></label>
     </div>
 
     <fieldset>
@@ -649,6 +685,7 @@ function applyReceiptText(manual, replace) {
   if (p.history) return showHistory(manual, p);
   const filled = [];
   d.inspection = p.inspection || null;
+  d.purchase = p.purchase || null;
   if (p.inspection) {
     // Recommended work wasn't done: record only the inspection, no cost.
     d.services = ['inspection'];
@@ -669,6 +706,8 @@ function applyReceiptText(manual, replace) {
   if (s) {
     s.innerHTML = p.otherVehicle
       ? `<span class="warn">⚠︎ This looks like a different vehicle: <b>${esc(p.otherVehicle.description || 'unknown vehicle')}</b> (VIN ${esc(p.otherVehicle.vin)}). It doesn't match any of your three cars, so the vehicle was left blank. Don't save it unless it's really for one of your cars.</span>`
+      : p.purchase
+      ? `✓ Read as a <b>purchase document</b>${p.vehicleId ? ` for the ${esc(vName(vehicle(p.vehicleId)))}` : ''}: ${[p.date && 'date ' + fmtDate(p.date), p.mileage && fmtMiles(p.mileage), p.total && fmtMoney(p.total), p.shop].filter(Boolean).map(esc).join(' · ')}. Check it, then save. The car will show when you bought it, and earlier service is labelled as the previous owner's.`
       : p.inspection
       ? `✓ Read as a <b>dealer inspection</b>: ${p.inspection.recommendations.length} recommendations (not recorded as done)${Object.keys(p.inspection.tread).length ? ', tire tread' : ''}${Object.keys(p.inspection.pads).length ? ', brake pads' : ''}. After saving, the car's Schedule tab shows what's really needed.`
       : filled.length
@@ -689,13 +728,17 @@ function showHistory(manual, p) {
   const v = vehicle(d.vehicleId);
   const existing = vehicleRecords(state.records, d.vehicleId);
   const fresh = h.visits.filter((x) => !existing.some((r) => r.date === x.date));
+  const pu = p.purchase && (p.purchase.price || p.date) ? p.purchase : null;
+  const hasPurchase = pu && existing.some((r) => (r.services || []).includes('purchase') && r.date === p.date);
+  const addPurchase = pu && !hasPurchase;
   s.innerHTML = `<div class="card history-import">
-    <h3>📜 Vehicle history report${v ? ` · ${esc(vName(v))}` : ''}</h3>
+    <h3>📜 ${pu ? 'Purchase + vehicle history' : 'Vehicle history report'}${v ? ` · ${esc(vName(v))}` : ''}</h3>
+    ${pu ? `<p class="small"><b>Bought ${p.date ? fmtDate(p.date) : ''}</b>${p.mileage ? ' at ' + fmtMiles(p.mileage) : ''}${pu.price ? ' for ' + fmtMoney(pu.price) : ''}${pu.seller ? ' from ' + esc(pu.seller) : ''}${hasPurchase ? ' <span class="muted">(already in the app)</span>' : ''}.</p>` : ''}
     ${h.inService ? `<p class="small">In service since <b>${fmtDate(h.inService)}</b>. Time-based items will count from this date.</p>` : ''}
     <p class="small">${h.visits.length} past service visit${h.visits.length === 1 ? '' : 's'} found${fresh.length < h.visits.length ? ` (${h.visits.length - fresh.length} already in the app)` : ''}:</p>
     <ul class="plan-list">${h.visits.map((x) => `<li>${fmtDate(x.date)}${x.mileage ? ' · ' + fmtMiles(x.mileage) : ''} <span class="muted small">· ${x.services.map((id) => esc(SERVICES[id].name)).join(', ')}</span></li>`).join('')}</ul>
     <p class="muted small">History reports only say things like "Battery serviced" or "Transmission serviced". That can mean a check rather than a replacement, so treat these as approximate.</p>
-    ${v ? `<button class="btn full" id="importHistory">Import ${fresh.length} visit${fresh.length === 1 ? '' : 's'}${h.inService ? ' + in-service date' : ''}</button>` : '<p class="warn small">Choose the vehicle above first, then paste again.</p>'}
+    ${v ? `<button class="btn full" id="importHistory">Import ${[addPurchase && 'purchase', `${fresh.length} visit${fresh.length === 1 ? '' : 's'}`, h.inService && 'in-service date'].filter(Boolean).join(' + ')}</button>` : '<p class="warn small">Choose the vehicle above first, then paste again.</p>'}
   </div>`;
   const btn = document.getElementById('importHistory');
   if (btn) btn.onclick = async () => {
@@ -706,11 +749,19 @@ function showHistory(manual, p) {
         imageIds: [], source: 'history', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       });
     }
+    if (addPurchase) {
+      for (const im of d.images) await db.put('images', { id: im.id, blob: im.blob });
+      await db.put('records', {
+        id: uid(), vehicleId: d.vehicleId, date: p.date || toISODate(new Date()), mileage: p.mileage, shop: pu.seller || '',
+        total: pu.price ?? pu.totalPaid ?? null, services: ['purchase'], notes: purchaseNotes(pu), ocrText: d.ocrText,
+        imageIds: d.images.map((im) => im.id), purchase: pu, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      });
+    }
     if (h.inService) await saveSetting(`inService:${d.vehicleId}`, h.inService);
     const vid = d.vehicleId;
     draft = null;
     await loadState();
-    toast(`Imported ${fresh.length} visit${fresh.length === 1 ? '' : 's'}`);
+    toast(`Imported ${addPurchase ? 'purchase + ' : ''}${fresh.length} visit${fresh.length === 1 ? '' : 's'}`);
     go(`#/v/${vid}/history`);
   };
 }
@@ -785,6 +836,7 @@ async function saveDraft() {
     total: d.total === '' || d.total == null ? null : Number(d.total),
     services: d.services,
     inspection: d.inspection || null,
+    purchase: d.purchase || null,
     notes: d.notes.trim(),
     ocrText: d.ocrText,
     imageIds: keepIds,
@@ -792,6 +844,7 @@ async function saveDraft() {
     updatedAt: new Date().toISOString(),
   };
   await db.put('records', rec);
+  if (rec.purchase?.regExpires) await saveSetting(`regExpires:${rec.vehicleId}`, rec.purchase.regExpires);
   await db.requestPersistence();
   draft = null;
   await loadState();
@@ -955,6 +1008,8 @@ async function render() {
 }
 
 window.addEventListener('hashchange', () => {
+  // Close any open sheet when moving to another screen.
+  document.querySelectorAll('.sheet-backdrop').forEach((el) => el.remove());
   // Leaving the editor discards an unsaved draft unless we're re-rendering it.
   if (!location.hash.startsWith('#/add') && !location.hash.startsWith('#/edit')) draft = null;
   render();

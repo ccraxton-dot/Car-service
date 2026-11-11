@@ -421,13 +421,119 @@ export function detectHistory(text) {
     result.push({ ...v, services, details: v.details.join('; ') });
   }
   result.sort((a, b) => a.date.localeCompare(b.date));
+  // A buyer's order that merely mentions "Carfax" isn't a history report.
+  if (!result.length && !inService) return null;
   return { inService, visits: result };
+}
+
+// ---------- Purchase documents (buyer's order, bill of sale, title application) ----------
+const PURCHASE_STRONG = /(buyer'?s order|bill of sale|retail (installment|purchase)|purchase agreement|vehicle purchase|application for texas title|title application|form 130-u)/i;
+const PURCHASE_WEAK = /(cash price|sales price|selling price|purchase price|price of vehicle|date of sale|trade[- ]?in|amount financed|down payment|documentary fee)/gi;
+const AMOUNT = /\$?\s?(\d{1,3}(?:,\d{3})+(?:\.\d{2})?|\d+\.\d{2})/;
+
+// Amount on the labelled line, or alone on one of the next two lines.
+function labelledAmount(lines, label, skip) {
+  for (let i = 0; i < lines.length; i++) {
+    if (!label.test(lines[i]) || (skip && skip.test(lines[i]))) continue;
+    const after = lines[i].replace(label, ' ');
+    let m = after.match(AMOUNT);
+    for (let j = i + 1; !m && j <= i + 2 && j < lines.length; j++) {
+      if (/^\(?\$?\s?[\d,]+(\.\d{2})?\)?$/.test(lines[j])) m = lines[j].match(AMOUNT);
+      else break;
+    }
+    if (m) {
+      const v = +m[1].replace(/,/g, '');
+      if (v > 0) return v;
+    }
+  }
+  return null;
+}
+
+// Value after "Label:" on the same line, or on the next line.
+function labelledText(lines, label) {
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(label);
+    if (!m) continue;
+    const rest = lines[i].slice(m.index + m[0].length).replace(/^[\s:#-]+/, '').trim();
+    const val = rest || lines[i + 1] || '';
+    if (/[A-Za-z]{3}/.test(val) && !/signature/i.test(val)) return val.replace(/\s{2,}.*$/, '').slice(0, 60);
+  }
+  return '';
+}
+
+// Dates that can be in the future, e.g. "Registration Expiration 04/2026".
+function futureDate(str) {
+  let m = str.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+  if (m) return `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`;
+  m = str.match(/\b(\d{1,2})[\/\-](20\d{2})\b/);
+  if (m) {
+    const last = new Date(+m[2], +m[1], 0).getDate();
+    return `${m[2]}-${m[1].padStart(2, '0')}-${last}`;
+  }
+  return null;
+}
+
+export function detectPurchase(text) {
+  const weak = new Set((text.match(PURCHASE_WEAK) || []).map((w) => w.toLowerCase()));
+  if (!PURCHASE_STRONG.test(text) && weak.size < 2) return null;
+  const lines = splitLines(text);
+  const price = labelledAmount(lines, /(cash price of vehicle|vehicle (sales |selling )?price|sales price|selling price|sale price|purchase price|price of vehicle|cash price)/i, /total/i)
+    ?? labelledAmount(lines, /total cash price/i);
+  const totalPaid = labelledAmount(lines, /(total (cash |purchase |sale |delivered )?price|total (amount )?due|grand total|total amount)/i, /sub/i);
+  const tax = labelledAmount(lines, /(sales (and use )?tax|motor vehicle (sales )?tax)/i);
+  const tradeIn = labelledAmount(lines, /trade[- ]?in( allowance| value)?/i);
+  const financed = labelledAmount(lines, /amount financed/i);
+  let seller = labelledText(lines, /^(seller( name)?|dealer(ship)?( name)?|sold by)\b:?/i);
+  if (!seller || /signature/i.test(seller)) seller = detectShop(text);
+  seller = seller ? titleCase(seller) : '';
+  // Date of sale: labelled, else the general date logic.
+  let date = null;
+  for (let i = 0; i < lines.length && !date; i++) {
+    if (!/(date of sale|sale date|purchase date|contract date|date sold|deal date|^date:?$)/i.test(lines[i])) continue;
+    const ds = datesInLine(lines[i]).concat(datesInLine(lines[i + 1] || ''));
+    if (ds.length) date = toISODate(ds[0]);
+  }
+  let regExpires = null;
+  for (let i = 0; i < lines.length && !regExpires; i++) {
+    if (/(registration|reg\.?|tag|sticker)\s*(expir|exp\b)|expiration date|valid (thru|through|until)/i.test(lines[i])) {
+      regExpires = futureDate(lines[i]) || futureDate(lines[i + 1] || '');
+    }
+  }
+  return { price, totalPaid, tax, tradeIn, financed, seller, date, regExpires };
+}
+
+export function purchaseNotes(pu) {
+  const parts = [];
+  const $ = (n) => '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (pu.price) parts.push(`price ${$(pu.price)}`);
+  if (pu.tax) parts.push(`tax ${$(pu.tax)}`);
+  if (pu.tradeIn) parts.push(`trade-in ${$(pu.tradeIn)}`);
+  if (pu.totalPaid && pu.totalPaid !== pu.price) parts.push(`total ${$(pu.totalPaid)}`);
+  if (pu.financed) parts.push(`financed ${$(pu.financed)}`);
+  if (pu.regExpires) parts.push(`registration expires ${pu.regExpires}`);
+  return parts.length ? `Purchase: ${parts.join(', ')}.` : '';
 }
 
 export function parseReceipt(text) {
   const history = detectHistory(text);
+  const purchase = detectPurchase(text);
   if (history) {
-    return { vehicleId: detectVehicle(text), date: null, mileage: null, total: null, shop: '', services: [], notes: '', history };
+    return {
+      vehicleId: detectVehicle(text), date: purchase?.date || null, mileage: purchase ? detectMileage(text) : null,
+      total: null, shop: '', services: [], notes: '', history, purchase,
+    };
+  }
+  if (purchase) {
+    return {
+      vehicleId: detectVehicle(text),
+      date: purchase.date || detectDate(text),
+      mileage: detectMileage(text),
+      total: purchase.price ?? purchase.totalPaid,
+      shop: purchase.seller,
+      services: ['purchase'],
+      notes: purchaseNotes(purchase),
+      purchase,
+    };
   }
   const base = parseReceiptInner(text);
   if (!base.vehicleId) {
