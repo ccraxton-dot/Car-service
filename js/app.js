@@ -739,11 +739,39 @@ function pasteText(manual) {
   });
 }
 
+// Same car and date, plus the same receipt text, total or services: almost
+// certainly the same receipt saved twice. (Two different jobs on the same day,
+// like an oil change and a brake fluid invoice, differ in total and services.)
+function findDuplicate(d) {
+  const total = d.total === '' || d.total == null ? null : Number(d.total);
+  const svc = [...d.services].sort().join(',');
+  return state.records.find((r) => r.id !== d.id && r.vehicleId === d.vehicleId && r.date === d.date && (
+    (d.ocrText && r.ocrText && r.ocrText.trim() === d.ocrText.trim())
+    || (total != null && r.total != null && Math.abs(r.total - total) < 0.01)
+    || [...(r.services || [])].sort().join(',') === svc
+  )) || null;
+}
+
+function confirmDuplicate(r) {
+  const names = (r.services || []).map((s) => SERVICES[s]?.name || s).join(', ');
+  sheet(`<h3>Already saved?</h3>
+    <p class="small">You already have a record for this car on <b>${fmtDate(r.date)}</b>:</p>
+    <div class="card"><b>${esc(names)}</b><div class="muted small">${r.shop ? esc(r.shop) + ' · ' : ''}${r.mileage ? fmtMiles(r.mileage) + ' · ' : ''}${fmtMoney(r.total) || 'no total'}</div></div>
+    <p class="small muted">If it's the same receipt, don't save it again. If it's a different job from the same day, save it.</p>
+    <div class="row"><button class="btn ghost" id="viewDup">Don't save, show existing</button><button class="btn" id="saveDup">Save anyway</button></div>`,
+  (el, close) => {
+    el.querySelector('#viewDup').onclick = () => { close(); draft = null; go(`#/r/${r.id}`); };
+    el.querySelector('#saveDup').onclick = () => { close(); draft.dupOk = true; saveDraft(); };
+  });
+}
+
 async function saveDraft() {
   const d = draft;
   if (!d.vehicleId) return toast('Choose a vehicle');
   if (!d.date) return toast('Enter the service date');
   if (!d.services.length) return toast('Check at least one service');
+  const dup = !d.dupOk && findDuplicate(d);
+  if (dup) return confirmDuplicate(dup);
   const prev = state.records.find((r) => r.id === d.id);
   const keepIds = d.images.map((i) => i.id);
   for (const im of d.images) await db.put('images', { id: im.id, blob: im.blob });
