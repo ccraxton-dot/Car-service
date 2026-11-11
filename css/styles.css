@@ -262,3 +262,8 @@ a.link { color: var(--accent-blue); font-weight: 600; display: inline-block; mar
 .history-import { margin-top: 8px; color: var(--text); }
 .history-import h3 { margin: 0 0 6px; }
 .history-import p { margin: 4px 0; }
+
+/* ownership */
+.owned-line { margin-top: 8px; }
+a.owned { display: block; color: var(--text); }
+.tag { white-space: nowrap; display: inline-block; }

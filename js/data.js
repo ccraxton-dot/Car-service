@@ -125,6 +125,10 @@ export const SERVICES = {
     name: 'Fuel system cleaning',
     keywords: ['fuel system', 'fuel induction', 'injector clean', 'throttle body', 'intake clean'],
   },
+  purchase: {
+    name: 'Vehicle purchase',
+    keywords: [],
+  },
   other: {
     name: 'Other / repair',
     keywords: [],
