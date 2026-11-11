@@ -208,7 +208,8 @@ export function detectShop(text) {
   // Inspection reports: "Station Name: CARMAX-AUSTIN"
   const station = text.match(/station name:[ \t]*([A-Za-z][^\n]{2,40})/i);
   if (station) return titleCase(station[1].replace(/\s*#\s*\d+$/, ''));
-  const lines = splitLines(text).slice(0, 60).map((l) => l.replace(/\s*#\s*\d+$/, ''));
+  const lines = splitLines(text).slice(0, 60)
+    .map((l) => l.replace(/\s+(deal|cust|ro|stock|store|invoice|log)\s*(no\.?|#).*$/i, '').replace(/\s*#\s*\d+$/, ''));
   // A short name-like line in capitals that sounds like a shop ("OIL CHANGERS").
   for (const l of lines) {
     const words = l.split(/\s+/);
@@ -375,19 +376,78 @@ export function detectInspection(text) {
 // ---------- Vehicle history reports (AutoCheck / Carfax) ----------
 const HISTORY = /(autocheck|carfax|vehicle history report|detailed vehicle history)/i;
 const HISTORY_MAP = [
-  [/lube|oil (and\/or )?filter|oil change/i, 'oil'],
+  [/lube|[o0]il (and\/or |and )?filter|oil change/i, 'oil'],
   [/tires? or wheels|tire rotat|tires? rotated|wheels? (balanced|aligned)/i, 'tire_rotation'],
+  [/tires? mounted|tire\(s\) replaced|tires? replaced|new tires?/i, 'tire_replace'],
+  [/serpentine|drive belt|belt replaced/i, 'drive_belt'],
+  [/wiper/i, 'wipers'],
   [/battery/i, 'battery_12v'],
   [/transmission serviced|transmission (fluid|flush)/i, 'transmission_fluid'],
   [/fuel system/i, 'fuel_system'],
   [/brake fluid/i, 'brake_fluid'],
-  [/brakes? (serviced|replaced|pads)/i, 'brakes'],
+  [/brakes? (serviced|replaced|pads)|pads replaced|rotor\(?s?\)? (resurfaced|replaced)/i, 'brakes'],
   [/coolant|cooling system/i, 'coolant'],
   [/cabin|air filter/i, 'cabin_filter'],
   [/spark plug/i, 'spark_plugs'],
   [/alignment/i, 'alignment'],
-  [/emission inspection|safety inspection/i, 'state_inspection'],
+  [/emissions? inspection|safety inspection/i, 'state_inspection'],
 ];
+
+// CARFAX "Detailed History": rows start with a date, then mileage, source and
+// comment lines ("-Oil and filter changed"). Phone OCR can cut the year short
+// ("06/30/202"), so a 3-digit year is completed from the previous row.
+function carfaxEvents(lines, visits) {
+  let cur = null;
+  let prevYear = null;
+  const start = (iso, rest) => {
+    if (!visits.has(iso)) visits.set(iso, { date: iso, mileage: null, source: '', details: [] });
+    cur = visits.get(iso);
+    const mi = rest.match(/^\s*(\d{1,3}(?:,\d{3})+|\d{1,6})\b(?![\/.])/);
+    if (mi) cur.mileage = Math.max(cur.mileage || 0, +mi[1].replace(/,/g, ''));
+    cur.details.push(rest.replace(/^\s*[\d,]+\s*/, ''));
+  };
+  for (const l of lines) {
+    let m = l.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\b(.*)$/);
+    if (!m) {
+      const t = l.match(/^(\d{1,2})\/(\d{1,2})\/(\d{3})(?!\d)(.*)$/);
+      if (t && prevYear && String(prevYear).startsWith(t[3])) m = [t[0], t[1], t[2], String(prevYear), t[4]];
+    }
+    if (m) {
+      const d = validDate(+m[3], +m[1], +m[2]);
+      if (d) { prevYear = +m[3]; start(toISODate(d), m[4]); continue; }
+    }
+    // "Recent service highlights": "+ Brake fluid flushed/changed 06/30/2025"
+    const tail = l.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s*$/);
+    if (tail && /[a-z]{4}/i.test(l)) {
+      const d = validDate(+tail[3], +tail[1], +tail[2]);
+      if (d) {
+        const iso = toISODate(d);
+        if (!visits.has(iso)) visits.set(iso, { date: iso, mileage: null, source: '', details: [] });
+        visits.get(iso).details.push(l.replace(tail[0], ''));
+        continue;
+      }
+    }
+    if (cur) cur.details.push(l);
+  }
+  // A service row the OCR left without mileage: borrow a reading from up to
+  // two weeks before (e.g. the auction a few days earlier).
+  const sorted = [...visits.values()].sort((a, b) => a.date.localeCompare(b.date));
+  sorted.forEach((v, i) => {
+    if (v.mileage) return;
+    for (let j = i - 1; j >= 0; j--) {
+      const days = (new Date(v.date) - new Date(sorted[j].date)) / 86400000;
+      if (days > 14) break;
+      if (sorted[j].mileage > 100) { v.mileage = sorted[j].mileage; break; }
+    }
+  });
+}
+
+// First retail sale / first owner = when the car went into service.
+function firstSale(visits) {
+  const sale = [...visits.values()].filter((v) => /vehicle sold|first owner reported/i.test(v.details.join(' ')))
+    .sort((a, b) => a.date.localeCompare(b.date))[0];
+  return sale ? sale.date : null;
+}
 
 export function detectHistory(text) {
   if (!HISTORY.test(text)) return null;
@@ -413,6 +473,8 @@ export function detectHistory(text) {
     if (det) { v.details.push(det[1]); inDetails = true; return; }
     if (inDetails && /[a-z]/.test(l) && !/^(back to top|owner \d|\d)/i.test(l)) v.details.push(l);
   });
+  if (!visits.size) carfaxEvents(lines, visits);
+  if (!inService) inService = firstSale(visits);
   const result = [];
   for (const v of visits.values()) {
     const text = v.details.join(' ');
@@ -428,7 +490,7 @@ export function detectHistory(text) {
 
 // ---------- Purchase documents (buyer's order, bill of sale, title application) ----------
 const PURCHASE_STRONG = /(buyer'?s order|buyer'?s tag receipt|itemization of purchase|bill of sale|retail (installment|purchase)|purchase agreement|vehicle purchase|application for texas title|title application|form 130-u)/i;
-const PURCHASE_WEAK = /(cash price|sales price|selling price|purchase price|price of vehicle|date of sale|trade[- ]?in|amount financed|down payment|documentary fee)/gi;
+const PURCHASE_WEAK = /(cash price|sales price|sale price|selling price|purchase price|price of vehicle|date of sale|trade[- ]?in|trade allowance|net due|total balance due|purchase information|amount financed|down payment|documentary fee)/gi;
 const AMOUNT = /\$?\s?(\d{1,3}(?:,\d{3})+(?:\.\d{2})?|\d+\.\d{2})/;
 
 // Amount on the labelled line, or alone on one of the next two lines.
@@ -481,11 +543,11 @@ export function detectPurchase(text, force = false) {
   const weak = new Set((text.match(PURCHASE_WEAK) || []).map((w) => w.toLowerCase()));
   if (!force && !PURCHASE_STRONG.test(text) && weak.size < 2) return null;
   const lines = splitLines(text);
-  const price = labelledAmount(lines, /(base price of vehicle|base price|cash price of vehicle|vehicle (sales |selling )?price|sales price|selling price|sale price|purchase price|price of vehicle|cash price)/i, /total/i)
+  const price = labelledAmount(lines, /(net price|base price of vehicle|base price|cash price of vehicle|vehicle (sales |selling )?price|sales price|selling price|sale price|purchase price|price of vehicle|cash price)/i, /total/i)
     ?? labelledAmount(lines, /total cash price/i);
-  const totalPaid = labelledAmount(lines, /(total contract (price|amount( due)?)|total (cash |purchase |sale |delivered )?price|total (amount )?due|grand total|total amount)/i, /sub/i);
+  const totalPaid = labelledAmount(lines, /(total balance due|total contract (price|amount( due)?)|total (cash |purchase |sale |delivered )?price|total (amount )?due|grand total|total amount)/i, /sub/i);
   const tax = labelledAmount(lines, /(sales (and use )?tax|motor vehicle (sales )?tax)/i);
-  const tradeIn = labelledAmount(lines, /trade[- ]?in( allowance| value)?/i);
+  const tradeIn = labelledAmount(lines, /(trade[- ]?in( allowance| value)?|trade allowance)/i);
   const financed = labelledAmount(lines, /amount financed/i);
   let seller = labelledText(lines, /^(seller( name)?|dealer( name)?|dealership( name)?|sold by|issuing dealer)\b\s*:?/i);
   const chain = text.match(/\b(carmax|carvana|autonation|vroom|drivetime|echopark|enterprise car sales)\b/i);
@@ -497,6 +559,11 @@ export function detectPurchase(text, force = false) {
   for (let i = 0; i < lines.length && !date; i++) {
     if (!/(date of sale|sale date|purchase date|contract date|date sold|deal date|^date:?$)/i.test(lines[i])) continue;
     const ds = datesInLine(lines[i]).concat(datesInLine(lines[i + 1] || ''));
+    if (ds.length) date = toISODate(ds[0]);
+  }
+  for (let i = 0; i < Math.min(lines.length, 12) && !date; i++) {
+    if (OTHER_DATE.test(lines[i])) continue;
+    const ds = datesInLine(lines[i]);
     if (ds.length) date = toISODate(ds[0]);
   }
   let regExpires = null;
