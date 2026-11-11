@@ -65,7 +65,7 @@ function validDate(y, m, d) {
 }
 
 // Dates on a receipt that are NOT the service date.
-const OTHER_DATE = /(deliv|in[\s-]*serv|warrant|prod(uction)?\b|prod\.? ?date|sold|purchas|expir|\bexp\b|next|due\b|recommend|remind|birth|\bdob\b|valid|since|start|member|reg(istration)?\b|cert)/i;
+const OTHER_DATE = /(\beff\b|effective|policy|insurance|e-title|print date|deliv|in[\s-]*serv|warrant|prod(uction)?\b|prod\.? ?date|sold|purchas|expir|\bexp\b|next|due\b|recommend|remind|birth|\bdob\b|valid|since|start|member|reg(istration)?\b|cert)/i;
 // Labels that usually sit next to the service date.
 const SERVICE_DATE = /(date|invoice|\binv\b|\br\.?\s?o\b|repair order|work order|opened|closed|complet|ready|printed|visit|served|time\s*in|in\s*time)/i;
 
@@ -202,7 +202,7 @@ export function detectTotal(text) {
 }
 
 const SHOP_WORDS = /\b(oil|lube|auto|automotive|tire|tires|motors?|kia|nissan|garage|repair|car care|service center|valvoline|jiffy|firestone|pep boys|midas|meineke|goodyear|costco|walmart|discount tire|les schwab|mavis|monro|take 5|grease monkey|express)\b/i;
-const NOT_SHOP = /(technician|customer|checklist|invoice|receipt|repair order|surcharge|\bfilter\b|\bchange\b|cleaner|\bsystem\b|\bfluid\b|\bpoints\b|www\.|http|@)/i;
+const NOT_SHOP = /(\b(make|model|year|vin|stock)\b\s*:|technician|customer|checklist|invoice|receipt|repair order|surcharge|\bfilter\b|\bchange\b|cleaner|\bsystem\b|\bfluid\b|\bpoints\b|www\.|http|@)/i;
 
 export function detectShop(text) {
   // Inspection reports: "Station Name: CARMAX-AUSTIN"
@@ -427,7 +427,7 @@ export function detectHistory(text) {
 }
 
 // ---------- Purchase documents (buyer's order, bill of sale, title application) ----------
-const PURCHASE_STRONG = /(buyer'?s order|bill of sale|retail (installment|purchase)|purchase agreement|vehicle purchase|application for texas title|title application|form 130-u)/i;
+const PURCHASE_STRONG = /(buyer'?s order|buyer'?s tag receipt|itemization of purchase|bill of sale|retail (installment|purchase)|purchase agreement|vehicle purchase|application for texas title|title application|form 130-u)/i;
 const PURCHASE_WEAK = /(cash price|sales price|selling price|purchase price|price of vehicle|date of sale|trade[- ]?in|amount financed|down payment|documentary fee)/gi;
 const AMOUNT = /\$?\s?(\d{1,3}(?:,\d{3})+(?:\.\d{2})?|\d+\.\d{2})/;
 
@@ -437,7 +437,8 @@ function labelledAmount(lines, label, skip) {
     if (!label.test(lines[i]) || (skip && skip.test(lines[i]))) continue;
     const after = lines[i].replace(label, ' ');
     let m = after.match(AMOUNT);
-    for (let j = i + 1; !m && j <= i + 2 && j < lines.length; j++) {
+    for (let j = i + 1; !m && j <= i + 3 && j < lines.length; j++) {
+      if (/^\$$/.test(lines[j])) continue;
       if (/^\(?\$?\s?[\d,]+(\.\d{2})?\)?$/.test(lines[j])) m = lines[j].match(AMOUNT);
       else break;
     }
@@ -456,7 +457,8 @@ function labelledText(lines, label) {
     if (!m) continue;
     const rest = lines[i].slice(m.index + m[0].length).replace(/^[\s:#-]+/, '').trim();
     const val = rest || lines[i + 1] || '';
-    if (/[A-Za-z]{3}/.test(val) && !/signature/i.test(val)) return val.replace(/\s{2,}.*$/, '').slice(0, 60);
+    // Skip a value that is really the next label ("Dealer Number:").
+    if (/[A-Za-z]{3}/.test(val) && !/signature|number|:$/i.test(val)) return val.replace(/\s{2,}.*$/, '').slice(0, 60);
   }
   return '';
 }
@@ -477,15 +479,17 @@ export function detectPurchase(text) {
   const weak = new Set((text.match(PURCHASE_WEAK) || []).map((w) => w.toLowerCase()));
   if (!PURCHASE_STRONG.test(text) && weak.size < 2) return null;
   const lines = splitLines(text);
-  const price = labelledAmount(lines, /(cash price of vehicle|vehicle (sales |selling )?price|sales price|selling price|sale price|purchase price|price of vehicle|cash price)/i, /total/i)
+  const price = labelledAmount(lines, /(base price of vehicle|base price|cash price of vehicle|vehicle (sales |selling )?price|sales price|selling price|sale price|purchase price|price of vehicle|cash price)/i, /total/i)
     ?? labelledAmount(lines, /total cash price/i);
-  const totalPaid = labelledAmount(lines, /(total (cash |purchase |sale |delivered )?price|total (amount )?due|grand total|total amount)/i, /sub/i);
+  const totalPaid = labelledAmount(lines, /(total contract (price|amount( due)?)|total (cash |purchase |sale |delivered )?price|total (amount )?due|grand total|total amount)/i, /sub/i);
   const tax = labelledAmount(lines, /(sales (and use )?tax|motor vehicle (sales )?tax)/i);
   const tradeIn = labelledAmount(lines, /trade[- ]?in( allowance| value)?/i);
   const financed = labelledAmount(lines, /amount financed/i);
-  let seller = labelledText(lines, /^(seller( name)?|dealer(ship)?( name)?|sold by)\b:?/i);
-  if (!seller || /signature/i.test(seller)) seller = detectShop(text);
+  let seller = labelledText(lines, /^(seller( name)?|dealer( name)?|dealership( name)?|sold by|issuing dealer)\b\s*:?/i);
+  const chain = text.match(/\b(carmax|carvana|autonation|vroom|drivetime|echopark|enterprise car sales)\b/i);
+  if (!seller || /signature|number/i.test(seller)) seller = chain ? chain[1] : detectShop(text);
   seller = seller ? titleCase(seller) : '';
+  if (/^carmax$/i.test(seller)) seller = 'CarMax';
   // Date of sale: labelled, else the general date logic.
   let date = null;
   for (let i = 0; i < lines.length && !date; i++) {
@@ -495,7 +499,7 @@ export function detectPurchase(text) {
   }
   let regExpires = null;
   for (let i = 0; i < lines.length && !regExpires; i++) {
-    if (/(registration|reg\.?|tag|sticker)\s*(expir|exp\b)|expiration date|valid (thru|through|until)/i.test(lines[i])) {
+    if (/(registration|reg\.?|sticker)\s*(expir|exp\b)|registration valid (thru|through|until)/i.test(lines[i])) {
       regExpires = futureDate(lines[i]) || futureDate(lines[i + 1] || '');
     }
   }
